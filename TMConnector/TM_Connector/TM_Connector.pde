@@ -80,9 +80,9 @@ void portSelect(int n) {
   String selectedPortName = (String) cp5.get(ScrollableList.class, "portSelect").getItem(n).get("text");
 
   try {
-    // Open serial port at 115200 baud
-    myPort = new Serial(this, selectedPortName, 115200);
-    println("Connected to: " + selectedPortName);
+    // Open serial port at 921600 baud (8x faster for smooth FPS)
+    myPort = new Serial(this, selectedPortName, 921600);
+    println("Connected to: " + selectedPortName + " at 921600 baud");
   } 
   catch (Exception e) {
     println("Error opening serial port: " + e);

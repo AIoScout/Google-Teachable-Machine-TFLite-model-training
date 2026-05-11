@@ -28,6 +28,7 @@
  */
 bool GetImage(int image_width, int image_height, int channels, uint8_t* image_data) {
   // Fetch a frame buffer from the camera sensor
+  
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     // Return false if capture failed

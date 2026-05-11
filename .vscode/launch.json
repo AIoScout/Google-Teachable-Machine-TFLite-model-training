@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "/Users/koil/Desktop/Google-Teachable-Machine-TFLite-model-training/ESP32-P4-IMX219-PoC/main",
+      "program": "/Users/koil/Desktop/Google-Teachable-Machine-TFLite-model-training/ESP32-P4-IMX219-PoC/main/build/Debug/outDebug"
+    }
+  ]
+}
