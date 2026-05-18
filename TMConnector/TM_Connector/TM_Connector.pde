@@ -10,7 +10,7 @@ Serial myPort;
 // WebSocket server to communicate with Teachable Machine web interface
 WebsocketServer ws;
 
-// Constants - Must match ESP32 camera resolution
+// Constants - Must match TFLite camera resolution
 final int cameraWidth = 96;
 final int cameraHeight = 96;
 final int cameraBytesPerPixel = 1; // 1 for Grayscale
@@ -23,6 +23,7 @@ String[] portNames;
 ControlP5 cp5;
 ScrollableList portsList;
 boolean clientConnected = false;
+int lastFrame = -1;
 
 void setup()
 {
@@ -106,7 +107,6 @@ String [] filteredPorts(String[] ports) {
 // Frame synchronization state machine variables
 int syncState = 0; // 0: Searching for 0xAA, 1: Searching for 0x55, 2: Searching for 0xAA, 3: Reading pixels
 int readIndex = 0;
-int lastFrame = -1;
 
 // Serial event handler - called whenever data is available on the COM port
 void serialEvent(Serial myPort) {
@@ -147,7 +147,14 @@ void serialEvent(Serial myPort) {
         myImage.updatePixels();
         
         // Track time for optional FPS calculation
-        lastFrame = millis();
+        if (lastFrame == -1) {
+          lastFrame = millis();
+        } else {
+          int frameTime = millis() - lastFrame;
+          print("fps: ");
+          println(frameTime);
+          lastFrame = millis();
+        }
         
         // Send the raw image bytes to Teachable Machine as a Base64 string
         String b64Data = Base64.getEncoder().encodeToString(frameBuffer);
@@ -159,5 +166,10 @@ void serialEvent(Serial myPort) {
 
 // Handle messages from the Teachable Machine web client
 void webSocketServerEvent(String msg) {
-  if (msg.equals("tm-connected")) clientConnected = true;
+  if (msg == null) {
+    return;
+  }
+  if (msg.equals("tm-connected") || msg.contains("tm-connected")) {
+    clientConnected = true;
+  }
 }
