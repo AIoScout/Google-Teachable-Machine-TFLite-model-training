@@ -5,8 +5,8 @@
 	depth = 1
 	remote = origin
 	fetch = true
-[submodule "ESP32-P4-IMX219_PoC"]
-	path = ESP32_P4_IMX219-PoC
+[submodule "ESP32-P4-IMX219-PoC"]
+	path = ESP32-P4-IMX219-PoC
 	url = https://github.com/koilkl/ESP32-P4-IMX219-PoC.git
 	branch = main
 	depth = 1
