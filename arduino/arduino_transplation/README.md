@@ -55,8 +55,8 @@ void loop() {
 
 ### 高级功能
 
-- 设置增益：`imx219_set_gain(0xE8);` (范围：0x00-0xFF)
-- 设置曝光：`imx219_set_exposure(1750);` (单位：行)
+- 设置增益：`imx219_i2c_set_gain(0xE8);` (范围：0x00-0xFF)
+- 设置曝光：`imx219_i2c_set_exposure(1750);` (单位：行)
 - 写入寄存器：`imx219_write_reg(reg_addr, value);`
 - 读取寄存器：`imx219_read_reg(reg_addr, &value);`
 

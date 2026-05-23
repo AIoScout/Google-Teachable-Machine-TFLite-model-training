@@ -1,11 +1,15 @@
 #include <string.h>
 
+#include <Arduino.h>
+#include <Wire.h>
+
 #include "imx219.h"
 #include "imx219_regs.h"
 #include "esp_log.h"
 
 static const char *TAG = "imx219";
 static uint8_t s_i2c_num = 0;
+static TwoWire *s_wire = &Wire;
 static bool s_initialized = false;
 
 esp_err_t imx219_write_reg(uint16_t reg, uint8_t val) {
@@ -14,11 +18,11 @@ esp_err_t imx219_write_reg(uint16_t reg, uint8_t val) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    Wire.beginTransmission(IMX219_I2C_ADDR);
-    Wire.write((reg >> 8) & 0xFF);
-    Wire.write(reg & 0xFF);
-    Wire.write(val);
-    if (Wire.endTransmission() != 0) {
+    s_wire->beginTransmission(IMX219_I2C_ADDR);
+    s_wire->write((reg >> 8) & 0xFF);
+    s_wire->write(reg & 0xFF);
+    s_wire->write(val);
+    if (s_wire->endTransmission() != 0) {
         ESP_LOGE(TAG, "Failed to write reg 0x%04X", reg);
         return ESP_FAIL;
     }
@@ -31,29 +35,29 @@ esp_err_t imx219_read_reg(uint16_t reg, uint8_t *val) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    Wire.beginTransmission(IMX219_I2C_ADDR);
-    Wire.write((reg >> 8) & 0xFF);
-    Wire.write(reg & 0xFF);
-    if (Wire.endTransmission(false) != 0) {
+    s_wire->beginTransmission(IMX219_I2C_ADDR);
+    s_wire->write((reg >> 8) & 0xFF);
+    s_wire->write(reg & 0xFF);
+    if (s_wire->endTransmission(false) != 0) {
         ESP_LOGE(TAG, "Failed to send read request for reg 0x%04X", reg);
         return ESP_FAIL;
     }
 
-    Wire.requestFrom(IMX219_I2C_ADDR, 1);
-    if (Wire.available() != 1) {
+    s_wire->requestFrom(IMX219_I2C_ADDR, 1);
+    if (s_wire->available() != 1) {
         ESP_LOGE(TAG, "No data received from reg 0x%04X", reg);
         return ESP_FAIL;
     }
 
-    *val = Wire.read();
+    *val = s_wire->read();
     return ESP_OK;
 }
 
-esp_err_t imx219_set_gain(uint8_t gain) {
+esp_err_t imx219_i2c_set_gain(uint8_t gain) {
     return imx219_write_reg(0x0157, gain);
 }
 
-esp_err_t imx219_set_exposure(uint16_t exposure) {
+esp_err_t imx219_i2c_set_exposure(uint16_t exposure) {
     esp_err_t ret = imx219_write_reg(0x015A, (exposure >> 8) & 0xFF);
     if (ret != ESP_OK) return ret;
     return imx219_write_reg(0x015B, exposure & 0xFF);
@@ -104,23 +108,23 @@ esp_err_t imx219_init(uint8_t i2c_num, uint8_t sda_pin, uint8_t scl_pin, uint32_
     ESP_LOGI(TAG, "Initializing IMX219 on I2C%d: SDA=%d, SCL=%d, Freq=%lu Hz",
              i2c_num, sda_pin, scl_pin, freq);
 
-    if (i2c_num == 0) {
-        Wire.begin(sda_pin, scl_pin, freq);
-    } else {
-        Wire1.begin(sda_pin, scl_pin, freq);
-    }
     s_i2c_num = i2c_num;
+    s_wire = (i2c_num == 0) ? &Wire : &Wire1;
+    s_wire->begin(sda_pin, scl_pin, freq);
+    s_initialized = true;
 
     uint8_t id_h = 0, id_l = 0;
     if (imx219_read_reg(0x0000, &id_h) != ESP_OK ||
         imx219_read_reg(0x0001, &id_l) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read sensor ID");
+        s_initialized = false;
         return ESP_FAIL;
     }
 
     uint16_t id = (id_h << 8) | id_l;
     if (id != IMX219_PID) {
         ESP_LOGE(TAG, "ID Mismatch: Found 0x%04X, Expected 0x%04X", id, IMX219_PID);
+        s_initialized = false;
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -129,11 +133,10 @@ esp_err_t imx219_init(uint8_t i2c_num, uint8_t sda_pin, uint8_t scl_pin, uint32_
     esp_err_t ret = imx219_set_default_config();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to apply default configuration");
+        s_initialized = false;
         return ret;
     }
 
-    s_initialized = true;
     ESP_LOGI(TAG, "IMX219 initialized successfully");
     return ESP_OK;
 }
-

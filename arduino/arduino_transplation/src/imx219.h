@@ -3,8 +3,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include <Arduino.h>
-#include <Wire.h>
 
 #define IMX219_I2C_ADDR 0x10
 #define IMX219_PID 0x0219
@@ -23,10 +21,10 @@ esp_err_t imx219_write_reg(uint16_t reg, uint8_t val);
 esp_err_t imx219_read_reg(uint16_t reg, uint8_t *val);
 
 // 设置增益 (0x00-0xFF)
-esp_err_t imx219_set_gain(uint8_t gain);
+esp_err_t imx219_i2c_set_gain(uint8_t gain);
 
 // 设置曝光 (行数)
-esp_err_t imx219_set_exposure(uint16_t exposure);
+esp_err_t imx219_i2c_set_exposure(uint16_t exposure);
 
 // 启动/停止流
 esp_err_t imx219_set_stream(bool enable);

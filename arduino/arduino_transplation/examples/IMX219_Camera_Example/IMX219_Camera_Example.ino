@@ -8,12 +8,26 @@
 #include <Arduino.h>
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include "esp_log.h"
 #include "imx219.h"
+#ifdef CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
+#undef CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
+#endif
+#define CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE 1
+#ifdef CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE
+#undef CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE
+#endif
+#define CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE 0
+#ifdef CONFIG_ESP_VIDEO_ENABLE_SPI_VIDEO_DEVICE
+#undef CONFIG_ESP_VIDEO_ENABLE_SPI_VIDEO_DEVICE
+#endif
+#define CONFIG_ESP_VIDEO_ENABLE_SPI_VIDEO_DEVICE 0
 #include "esp_video_init.h"
 #include "esp_video_ioctl.h"
 #include "esp_video_device.h"
+#include "esp_cam_ctlr_csi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/ledc.h"
@@ -22,7 +36,29 @@
 #include "nvs_flash.h"
 #include "jpeg_enc.h"
 
+#if defined(__riscv)
+#include "riscv/rv_utils.h"
+#endif
+
+extern "C" {
+struct esp_video;
+esp_err_t esp_video_vfs_dev_register(const char *name, struct esp_video *video);
+struct esp_video *esp_video_device_get_object(const char *name);
+void imx219_force_link(void);
+}
+
 static const char *TAG = "app_main";
+
+extern "C" esp_err_t __real_esp_cam_new_csi_ctlr(const esp_cam_ctlr_csi_config_t *config, esp_cam_ctlr_handle_t *ret_handle);
+extern "C" esp_err_t __wrap_esp_cam_new_csi_ctlr(const esp_cam_ctlr_csi_config_t *config, esp_cam_ctlr_handle_t *ret_handle) {
+    esp_cam_ctlr_csi_config_t cfg = *config;
+    if (cfg.clk_src != MIPI_CSI_PHY_CLK_SRC_PLL_F20M &&
+        cfg.clk_src != MIPI_CSI_PHY_CLK_SRC_PLL_F25M &&
+        cfg.clk_src != MIPI_CSI_PHY_CLK_SRC_RC_FAST) {
+        cfg.clk_src = MIPI_CSI_PHY_CLK_SRC_PLL_F20M;
+    }
+    return __real_esp_cam_new_csi_ctlr(&cfg, ret_handle);
+}
 
 // 硬件配置
 static const gpio_num_t I2C_MASTER_SCL_IO = GPIO_NUM_8;
@@ -87,16 +123,14 @@ static void init_demosaic_luts(int width, int height) {
     int x_offset = (width - crop_w) / 2;
     int y_offset = (height - crop_h) / 2;
 
-    // 缩放步长
-    float x_step = (float)crop_w / OUT_WIDTH;
-    float y_step = (float)crop_h / OUT_HEIGHT;
-
     // 生成查找表 (确保坐标对齐到偶数，用于BGGR去马赛克)
     for (int y = 0; y < OUT_HEIGHT; y++) {
-        s_y_lut[y] = (y_offset + (int)(y * y_step + 0.5f)) & ~1;
+        int src_y = (int)(((int64_t)y * crop_h + (OUT_HEIGHT / 2)) / OUT_HEIGHT);
+        s_y_lut[y] = (y_offset + src_y) & ~1;
     }
     for (int x = 0; x < OUT_WIDTH; x++) {
-        s_x_lut[x] = (x_offset + (int)(x * x_step + 0.5f)) & ~1;
+        int src_x = (int)(((int64_t)x * crop_w + (OUT_WIDTH / 2)) / OUT_WIDTH);
+        s_x_lut[x] = (x_offset + src_x) & ~1;
     }
 
     ESP_LOGI(TAG, "Sensor: %dx%d, Center crop: %dx%d at offset (%d,%d), Output: %dx%d",
@@ -142,11 +176,43 @@ static void rgb_to_gray(const uint8_t *rgb, uint8_t *gray, int pixel_count) {
 // 同步头
 const uint8_t syncHeader[] = {0xAA, 0x55, 0xAA};
 
+#if defined(__riscv)
+static uint32_t read_mstatus(void) {
+    uint32_t v;
+    asm volatile("csrr %0, mstatus" : "=r"(v));
+    return v;
+}
+
+static void fpu_enable_task(void *arg) {
+    rv_utils_enable_fpu();
+    ESP_LOGI(TAG, "FPU enable core=%d mstatus=0x%08x", (int)xPortGetCoreID(), (unsigned)read_mstatus());
+    xTaskNotifyGive((TaskHandle_t)arg);
+    vTaskDelete(NULL);
+}
+
+static void enable_fpu_all_cores(void) {
+    rv_utils_enable_fpu();
+    ESP_LOGI(TAG, "FPU enable core=%d mstatus=0x%08x", (int)xPortGetCoreID(), (unsigned)read_mstatus());
+#if defined(configNUMBER_OF_CORES) && (configNUMBER_OF_CORES > 1)
+    const BaseType_t self_core = xPortGetCoreID();
+    const BaseType_t other_core = self_core ? 0 : 1;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    if (xTaskCreatePinnedToCore(fpu_enable_task, "fpu_en", 2048, self, configMAX_PRIORITIES - 1, NULL, other_core) == pdPASS) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+    }
+#endif
+}
+#endif
+
 void setup() {
     // 初始化串口
     Serial.begin(921600);
     delay(100);
     Serial.println("ESP32-P4 IMX219 Camera Example");
+
+#if defined(__riscv)
+    enable_fpu_all_cores();
+#endif
 
     // 初始化NVS (用于摄像头驱动)
     esp_err_t err = nvs_flash_init();
@@ -166,28 +232,29 @@ void setup() {
     enable_xclk();
     delay(100);
 
-    // 初始化IMX219传感器
-    err = imx219_init(I2C_MASTER_NUM, I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO, I2C_MASTER_FREQ_HZ);
-    if (err != ESP_OK) {
-        Serial.println("Failed to initialize IMX219 sensor!");
-        return;
-    }
+  imx219_force_link();
 
     // 初始化CSI接口
-    esp_video_init_csi_config_t csi_config;
-    memset(&csi_config, 0, sizeof(csi_config));
-    csi_config.sccb_config.init_sccb = false;  // 我们已经自己初始化了I2C
-    csi_config.sccb_config.i2c_config.port = I2C_MASTER_NUM;
-    csi_config.sccb_config.i2c_config.scl_pin = I2C_MASTER_SCL_IO;
-    csi_config.sccb_config.i2c_config.sda_pin = I2C_MASTER_SDA_IO;
-    csi_config.sccb_config.freq = I2C_MASTER_FREQ_HZ;
-    csi_config.reset_pin = GPIO_NUM_NC;
-    csi_config.pwdn_pin = GPIO_NUM_NC;
+   esp_video_init_csi_config_t csi_config;
+memset(&csi_config, 0, sizeof(csi_config));
+csi_config.sccb_config.init_sccb = true;
+csi_config.sccb_config.i2c_config.port = I2C_MASTER_NUM;
+csi_config.sccb_config.i2c_config.scl_pin = I2C_MASTER_SCL_IO;
+csi_config.sccb_config.i2c_config.sda_pin = I2C_MASTER_SDA_IO;
+csi_config.sccb_config.freq = I2C_MASTER_FREQ_HZ;
+csi_config.reset_pin = GPIO_NUM_NC;
+csi_config.pwdn_pin = GPIO_NUM_NC;
 
-    esp_video_init_config_t cam_config;
-    memset(&cam_config, 0, sizeof(cam_config));
-    cam_config.csi = &csi_config;
-    esp_video_init(&cam_config);
+esp_video_init_config_t cam_config;
+memset(&cam_config, 0, sizeof(cam_config));
+cam_config.csi = &csi_config;
+
+err = esp_video_init(&cam_config);
+if (err != ESP_OK) {
+  ESP_LOGE(TAG, "esp_video_init failed: %s", esp_err_to_name(err));
+  Serial.println("esp_video_init failed!");
+  return;
+}
 
     // 打开CSI设备
     fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR);
@@ -229,9 +296,6 @@ void setup() {
     // 启动流
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     ioctl(fd, VIDIOC_STREAMON, &type);
-
-    // 启动传感器流
-    imx219_set_stream(true);
 
     // 分配图像缓冲区 (使用PSRAM)
     rgb_buf = (uint8_t *)heap_caps_malloc(OUT_WIDTH * OUT_HEIGHT * 3, MALLOC_CAP_SPIRAM);

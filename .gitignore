@@ -1,3 +1,4 @@
 .DS_Store
 /arduino/esp32-arduino-lib-builder
 arduino/arduino/arduino-esp32/
+/arduino/arduino-esp32
