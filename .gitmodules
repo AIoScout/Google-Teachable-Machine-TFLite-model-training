@@ -1,3 +1,14 @@
 [submodule "AItraining"]
 	path = AItraining
-	url = ./AItraining
+	url = https://github.com/koilkl/Aitraining.git
+	branch = main
+	depth = 1
+	remote = origin
+	fetch = true
+[submodule "ESP32_P4_IMX219"]
+	path = ESP32_P4_IMX219
+	url = https://github.com/koilkl/ESP32-P4-IMX219-PoC.git
+	branch = main
+	depth = 1
+	remote = origin
+	fetch = true
