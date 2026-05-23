@@ -1,0 +1,3 @@
+[submodule "AItraining"]
+	path = AItraining
+	url = ./AItraining
