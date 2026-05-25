@@ -36,14 +36,28 @@
 #include "imx219.h"
 #endif
 
-#if __has_include("esp_video_init.h")
+#if __has_include("esp_heap_caps.h")
+#include "esp_heap_caps.h"
+#endif
+
+#if __has_include("ESP32_P4_IMX219.h")
+#include <ESP32_P4_IMX219.h>
+#define TFLITE_P4_IMX219_HAS_ARDUINO_IMX219_LIB 1
+#elif __has_include(<ESP32_P4_IMX219.h>)
+#include <ESP32_P4_IMX219.h>
+#define TFLITE_P4_IMX219_HAS_ARDUINO_IMX219_LIB 1
+#else
+#define TFLITE_P4_IMX219_HAS_ARDUINO_IMX219_LIB 0
+#endif
+
+#if !TFLITE_P4_IMX219_HAS_ARDUINO_IMX219_LIB && __has_include("esp_video_init.h")
+#ifdef CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
+#undef CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
+#endif
+#define CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE 1
 #include "esp_video_init.h"
 #include "esp_video_ioctl.h"
 #include "esp_video_device.h"
-#endif
-
-#if __has_include("esp_heap_caps.h")
-#include "esp_heap_caps.h"
 #endif
 
 // Constants from main.ino
@@ -52,7 +66,7 @@
 #define OUT_WIDTH  96
 #define OUT_HEIGHT 96
 
-#if __has_include("esp_video_init.h")
+#if !TFLITE_P4_IMX219_HAS_ARDUINO_IMX219_LIB && __has_include("esp_video_init.h")
 #define TFLITE_P4_IMX219_HAS_ESP_VIDEO 1
 #else
 #define TFLITE_P4_IMX219_HAS_ESP_VIDEO 0
@@ -381,7 +395,42 @@ TfLiteStatus GetImage(tflite::ErrorReporter* error_reporter, int image_width, in
     return kTfLiteError;
   }
 
-#if TFLITE_P4_IMX219_HAS_ESP_VIDEO
+#if TFLITE_P4_IMX219_HAS_ARDUINO_IMX219_LIB
+  static bool s_ok = false;
+  if (!s_ok) {
+    s_ok = esp32_p4_imx219_begin();
+    if (!s_ok) {
+      TF_LITE_REPORT_ERROR(error_reporter, "esp32_p4_imx219_begin failed");
+      return kTfLiteError;
+    }
+  }
+
+  bool updated = false;
+  for (int tries = 0; tries < 100; tries++) {
+    if (esp32_p4_imx219_update()) {
+      updated = true;
+      break;
+    }
+    usleep(2000);
+  }
+  if (!updated) {
+    TF_LITE_REPORT_ERROR(error_reporter, "esp32_p4_imx219_update timeout");
+    return kTfLiteError;
+  }
+
+  const uint8_t *gray_u8 = esp32_p4_imx219_gray();
+  const size_t gray_size = esp32_p4_imx219_gray_size();
+  if (!gray_u8 || gray_size < (size_t)(OUT_WIDTH * OUT_HEIGHT)) {
+    TF_LITE_REPORT_ERROR(error_reporter, "invalid gray buffer");
+    return kTfLiteError;
+  }
+
+  for (int i = 0; i < OUT_WIDTH * OUT_HEIGHT; i++) {
+    image_data[i] = (int8_t)((int)gray_u8[i] - 128);
+  }
+
+  return kTfLiteOk;
+#elif TFLITE_P4_IMX219_HAS_ESP_VIDEO
   if (camera_init_if_needed(error_reporter) != kTfLiteOk) {
     return kTfLiteError;
   }

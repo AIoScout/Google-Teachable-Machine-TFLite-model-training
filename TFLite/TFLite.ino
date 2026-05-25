@@ -15,6 +15,8 @@ limitations under the License.
 
 // #include <TensorFlowLite.h>
 
+#include <ESP32_P4_IMX219.h>
+
 #include "main_functions.h"
 #include "image_provider.h"
 #include "model_settings.h"
@@ -84,7 +86,7 @@ void setup() {
   // Build an interpreter to run the model with.
   // NOLINTNEXTLINE(runtime-global-variables)
   static tflite::MicroInterpreter static_interpreter(
-      model, micro_op_resolver, tensor_arena, kTensorArenaSize, error_reporter);
+      model, micro_op_resolver, tensor_arena, kTensorArenaSize, nullptr, nullptr, false);
   interpreter = &static_interpreter;
 
   // Allocate memory from the tensor_arena for the model's tensors.
