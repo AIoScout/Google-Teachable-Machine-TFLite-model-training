@@ -12,3 +12,10 @@
 	depth = 1
 	remote = origin
 	fetch = true
+[submodule "TFLite"]
+	path = TFLite
+	url = https://github.com/koilkl/TFLite.git
+	branch = main
+	depth = 1
+	remote = origin
+	fetch = true
