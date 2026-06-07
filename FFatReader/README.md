@@ -85,10 +85,10 @@ In MSC mode, the sketch does not mount `/ffat` in the firmware. Use your compute
 
 ## FFat capacity limit (important)
 
-FFat is not infinite. With the partition scheme used by this repository (`app3M_fat9M_16MB`), FFat is roughly **9MB** usable.
+FFat is not infinite. With the partition scheme used by this repository (`app3M_fat9.9M_flash16MB`), FFat is roughly **9MB** usable.
 
-- One 96×96 grayscale frame is `96 * 96 = 9216 bytes`
-- Approx max frames:
+- One 96×96 grayscale frame stored as raw bytes is `96 * 96 = 9216 bytes(Not include the PGM file header)`
+- Approx maximum number of frames:
   - `~ 9 * 1024 * 1024 / 9216 ≈ 1000 frames`
 
 The real number is slightly lower due to filesystem overhead and PGM headers.

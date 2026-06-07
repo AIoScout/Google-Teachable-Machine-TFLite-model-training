@@ -93,10 +93,11 @@ In [TFLite.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-trainin
 
 ### FFat capacity (rule of thumb)
 
-With the default partition scheme `app3M_fat9M_16MB`, FFat is about **9MB**.
+With the default partition scheme `app3M_fat9.9M_flash16MB`, FFat is about **9MB**.
 
-- Per 96×96 grayscale frame: `96 * 96 = 9216 bytes`
-- Max frames (approx): `~ 9 * 1024 * 1024 / 9216 ≈ 1000`
+- One 96×96 grayscale frame stored as raw bytes is `96 * 96 = 9216 bytes(Not include the PGM file header)`
+- Approx maximum number of frames:
+  - `~ 9 * 1024 * 1024 / 9216 ≈ 1000 frames`
 
 When FFat is full, the TFLite sketch will stop saving new frames and keep running inference.
 
