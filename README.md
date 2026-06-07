@@ -91,6 +91,15 @@ In [TFLite.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-trainin
 - **Serial export**: use the commands in FFatReader (`bundle_runs`, `get`, `clean_*`) and receive data with `export_ffat.py`.
 - **USB MSC export**: set `kInterfaceMode = UsbMsc` in FFatReader and configure Arduino IDE exactly like [FFatReader/MSC_setting.png](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/FFatReader/MSC_setting.png). The board will appear as a USB drive on your computer.
 
+### FFat capacity (rule of thumb)
+
+With the default partition scheme `app3M_fat9M_16MB`, FFat is about **9MB**.
+
+- Per 96×96 grayscale frame: `96 * 96 = 9216 bytes`
+- Max frames (approx): `~ 9 * 1024 * 1024 / 9216 ≈ 1000`
+
+When FFat is full, the TFLite sketch will stop saving new frames and keep running inference.
+
 ## Key Features
 
 - **Native Resolution**: Uses 96x96 resolution directly from the hardware, which is the standard input size for Teachable Machine. No extra cropping required.

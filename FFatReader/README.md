@@ -82,3 +82,18 @@ Two common ways to export:
 - Make sure plug the type-c cable in the OTG port with your computer. 
 
 In MSC mode, the sketch does not mount `/ffat` in the firmware. Use your computer file manager to copy/delete files.
+
+## FFat capacity limit (important)
+
+FFat is not infinite. With the partition scheme used by this repository (`app3M_fat9M_16MB`), FFat is roughly **9MB** usable.
+
+- One 96×96 grayscale frame is `96 * 96 = 9216 bytes`
+- Approx max frames:
+  - `~ 9 * 1024 * 1024 / 9216 ≈ 1000 frames`
+
+The real number is slightly lower due to filesystem overhead and PGM headers.
+
+When FFat is full:
+
+- `TFLite` will stop saving new frames (inference continues).
+- You can delete old runs using FFatReader (`clean_runs`, `clean_all`, or `clean <path>`).
