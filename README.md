@@ -7,8 +7,10 @@ This project uses **ESP32-P4 + IMX219 (MIPI CSI-2)** to stream **96x96 grayscale
 - **ESP32-P4-IMX219-PoC**: ESP-IDF project that captures IMX219 frames and can output 96x96 grayscale over Serial.
 - **TMConnector**: Processing script. It receives Serial data, displays a preview, and forwards images to the web interface via WebSockets.
 - **AItraining**: The local training platform
-- TFLite: The template of using TensorFlow Lite in Arduino.
+- **TFLite**: Arduino sketch combining IMX219 + TensorFlow Lite, with optional frame saving (SD_MMC or FFat).
 - arduino: The customized board core for CSI camera and TensorFlow Lite in the esp32p4
+- **SDReader**: SD_MMC-only test sketch for the on-board MicroSD/TF slot.
+- **FFatReader**: FFat (flash FAT partition) export/clean tool (Serial or USB MSC mode).
 
 ## Setup Instructions for Remote AI training 
 
@@ -30,9 +32,10 @@ This project uses **ESP32-P4 + IMX219 (MIPI CSI-2)** to stream **96x96 grayscale
    - Windows default: `C:\Users\<you>\Documents\Arduino\hardware\esp32_mannual\esp32p4\`
 3. Restart Arduino IDE, then select:
    - Tools → Board → `ESP32_mannual` → `ESP32P4 Dev Module`
-4. Open the built-in example:
+4. Configure the Arduino IDE Tools menu for ESP32-P4 exactly like the screenshot: [setting.png](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/setting.png).
+5. Open the built-in example:
    - File → Examples → `ESP32_P4_IMX219` → `IMX219_Grayscale_Serial`
-5. Upload to the ESP32-P4 and make sure it outputs frames as `0xAA 0x55 0xAA + 96*96 bytes` over Serial.
+6. Upload to the ESP32-P4 and make sure it outputs frames as `0xAA 0x55 0xAA + 96*96 bytes` over Serial.
 
 ### 3. Run Processing Script (TMConnector)
 
@@ -61,6 +64,32 @@ Notes:
 
 - The current [CORE_REBUILD.md](/arduino/CORE_REBUILD.md) is a simplified “how to install and use the provided core” guide (mainly about correct paths).
 - Originally, this repository also used a “rebuild the Arduino core with esp32-arduino-lib-builder” workflow to bring `esp_video`/CSI into the core. If you need to rebuild from source, use Espressif's official lib-builder documentation: <https://docs.espressif.com/projects/arduino-esp32/en/latest/lib_builder.html>
+
+## Frame Saving (SD / FFat)
+
+Saving frames to the on-board MicroSD/TF slot via SD_MMC can be unstable on some ESP32-P4 boards (common errors: `0x107` timeout, `0x108` invalid response). This repository provides two storage options:
+
+- **SD_MMC (MicroSD/TF)**: removable, easy to copy files on a computer, but may be unstable depending on the board hardware.
+- **FFat (flash FAT partition)**: stable and reproducible. Files are stored in the device flash (`ffat` partition).
+
+### TFLite storage backend
+
+In [TFLite.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/TFLite/TFLite.ino) you can select the storage backend:
+
+- `StorageBackend::Auto`: try SD_MMC (`/sdcard`) first, then fall back to FFat (`/ffat`)
+- `StorageBackend::SdMmc`: SD_MMC only
+- `StorageBackend::FFat`: FFat only
+
+### Tools
+
+- SD_MMC test: [SDReader/SDReader.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/SDReader/SDReader.ino)
+- FFat export/clean tool: [FFatReader/FFatReader.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/FFatReader/FFatReader.ino)
+  - Serial export receiver script: [FFatReader/export_ffat.py](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/FFatReader/export_ffat.py)
+
+### Exporting FFat files
+
+- **Serial export**: use the commands in FFatReader (`bundle_runs`, `get`, `clean_*`) and receive data with `export_ffat.py`.
+- **USB MSC export**: set `kInterfaceMode = UsbMsc` in FFatReader and configure Arduino IDE exactly like [FFatReader/MSC_setting.png](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/FFatReader/MSC_setting.png). The board will appear as a USB drive on your computer.
 
 ## Key Features
 
