@@ -32,10 +32,23 @@ This project uses **ESP32-P4 + IMX219 (MIPI CSI-2)** to stream **96x96 grayscale
    - Windows default: `C:\Users\<you>\Documents\Arduino\hardware\esp32_mannual\esp32p4\`
 3. Restart Arduino IDE, then select:
    - Tools → Board → `ESP32_mannual` → `ESP32P4 Dev Module`
-4. Configure the Arduino IDE Tools menu for ESP32-P4 exactly like the screenshot: [setting.png](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/setting.png).
+4. Configure the Arduino IDE Tools menu for ESP32-P4 exactly like the screenshot: [setting_p4.png](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/setting_p4.png).
+
+![setting_p4](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/setting_p4.png)
+
 5. Open the built-in example:
    - File → Examples → `ESP32_P4_IMX219` → `IMX219_Grayscale_Serial`
 6. Upload to the ESP32-P4 and make sure it outputs frames as `0xAA 0x55 0xAA + 96*96 bytes` over Serial.
+
+### 2.c Build & Flash ESP32-S3 Receiver (If using Arduino)
+
+1. Open [S3_UART_Receiver/S3_UART_Receiver.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/S3_UART_Receiver.ino).
+2. Select board: `ESP32S3 Dev Module`.
+3. Configure the Arduino IDE Tools menu for ESP32-S3 exactly like the screenshot: [setting_s3.png](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/setting_s3.png).
+
+![setting_s3](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/setting_s3.png)
+
+4. Upload to the ESP32-S3 and open Serial Monitor at **115200** baud (USB CDC) to check logs.
 
 ### 3. Run Processing Script (TMConnector)
 
@@ -70,7 +83,7 @@ Notes:
 Saving frames to the on-board MicroSD/TF slot via SD_MMC can be unstable on some ESP32-P4 boards (common errors: `0x107` timeout, `0x108` invalid response). This repository provides two storage options:
 
 - **SD_MMC (MicroSD/TF)**: removable, easy to copy files on a computer, but may be unstable depending on the board hardware.
-- **FFat (flash FAT partition)**: stable and reproducible. Files are stored in the device flash (`ffat` partition).
+- **FFat (flash FAT partition)**: files are stored in the device flash (`ffat` partition). On the current new ESP32-P4 board, FFat is not available.
 
 ### TFLite storage backend
 
@@ -79,6 +92,10 @@ In [TFLite.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-trainin
 - `StorageBackend::Auto`: try SD_MMC (`/sdcard`) first, then fall back to FFat (`/ffat`)
 - `StorageBackend::SdMmc`: SD_MMC only
 - `StorageBackend::FFat`: FFat only
+
+New ESP32-P4 board note:
+
+- The current new board cannot use FFat. Use `StorageBackend::SdMmc`.
 
 ### Tools
 

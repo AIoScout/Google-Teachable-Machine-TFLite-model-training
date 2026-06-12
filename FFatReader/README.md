@@ -4,6 +4,10 @@ This sketch is a minimal **FFat** test for ESP32-P4.
 
 FFat uses an internal FAT partition in the device flash (your partition table contains a partition named `ffat`), so it does not depend on the on-board MicroSD slot.
 
+Important note (new ESP32-P4 board):
+
+- The current new board cannot use FFat. In that case, this sketch and FFat-related features in `TFLite` are not applicable. Use SD_MMC instead.
+
 ## What it does
 
 - Mounts FFat at `/ffat`
