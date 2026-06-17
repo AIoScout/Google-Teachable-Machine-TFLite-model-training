@@ -2,3 +2,8 @@
 /arduino/esp32-arduino-lib-builder
 arduino/arduino/arduino-esp32/
 /arduino/arduino-esp32
+/.dbg
+debug-open-project-page-stuck.md
+debug-capture-webcam-source.md
+debug-packaged-webcam-bounce.md
+debug-open-project-layout.md
