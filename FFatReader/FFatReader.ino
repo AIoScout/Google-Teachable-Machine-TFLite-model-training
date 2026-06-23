@@ -30,7 +30,9 @@ static constexpr bool kFormatOnFail = true;
 static constexpr const char *kPartitionLabel = "ffat";
 
 enum class InterfaceMode : uint8_t { Serial = 0, UsbMsc = 1 };
+//change here to change the mass storage mode
 static constexpr InterfaceMode kInterfaceMode = InterfaceMode::UsbMsc;
+static InterfaceMode s_interface_mode = kInterfaceMode;
 
 static char s_run_dir[32] = {0};
 static char s_last_file[96] = {0};
@@ -43,7 +45,7 @@ static uint16_t s_msc_block_size = 0;
 static void print_help() {
   Serial.println("Commands:");
   Serial.println("  help");
-  if (kInterfaceMode == InterfaceMode::UsbMsc) {
+  if (s_interface_mode == InterfaceMode::UsbMsc) {
     Serial.println("MSC mode: use host file manager to copy/delete files");
     return;
   }
@@ -491,11 +493,10 @@ void setup() {
   delay(200);
   Serial.println("P4 FFatReader start");
 
-  if (kInterfaceMode == InterfaceMode::UsbMsc) {
+  if (s_interface_mode == InterfaceMode::UsbMsc) {
 #if ARDUINO_USB_MODE == 1
     Serial.println("ERR USB Mode must be USB-OTG (TinyUSB)");
-    print_help();
-    return;
+    s_interface_mode = InterfaceMode::Serial;
 #else
     if (!start_msc_ffat()) {
       Serial.println("MSC start failed");
@@ -526,7 +527,7 @@ void loop() {
     return;
   }
 
-  if (kInterfaceMode == InterfaceMode::UsbMsc) {
+  if (s_interface_mode == InterfaceMode::UsbMsc) {
     if (strcmp(line, "help") == 0) {
       print_help();
     } else {
