@@ -27,10 +27,19 @@ struct Packet {
 
 static uint32_t s_bytes_rx = 0;
 static uint32_t s_packets_ok = 0;
+static uint32_t s_packets_bad = 0;
 static bool s_p4_connected = false;
 static bool s_uart_started = false;
 
 static constexpr int kP4DetectSamples = 16;
+
+static uint8_t calc_uart_checksum(const uint8_t *data, size_t len) {
+  uint8_t checksum = 0;
+  for (size_t i = 0; i < len; i++) {
+    checksum ^= data[i];
+  }
+  return checksum;
+}
 
 static int read_adc_avg() {
   int32_t sum = 0;
@@ -66,7 +75,7 @@ static void wait_for_p4_connected_blocking() {
 }
 
 static bool read_packet(Packet *out) {
-  static uint8_t buf[8];
+  static uint8_t buf[9];
   static uint8_t idx = 0;
   static uint8_t state = 0;
 
@@ -107,6 +116,12 @@ static bool read_packet(Packet *out) {
     idx = 0;
 
     if (buf[2] != kMsgTypeInference) {
+      s_packets_bad++;
+      return false;
+    }
+
+    if (calc_uart_checksum(buf, 8) != buf[8]) {
+      s_packets_bad++;
       return false;
     }
 
@@ -164,8 +179,9 @@ static void uart_task(void *arg) {
       const uint32_t now = millis();
       if (now - last_avail_ms >= 1000) {
         last_avail_ms = now;
-        DBG.printf("UART rx_avail=%d bytes=%lu packets=%lu\n", UartFromP4.available(),
-                   (unsigned long)s_bytes_rx, (unsigned long)s_packets_ok);
+        DBG.printf("UART rx_avail=%d bytes=%lu ok=%lu bad=%lu\n", UartFromP4.available(),
+                   (unsigned long)s_bytes_rx, (unsigned long)s_packets_ok,
+                   (unsigned long)s_packets_bad);
       }
       vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -175,8 +191,9 @@ static void uart_task(void *arg) {
 static void heartbeat_task(void *arg) {
   (void)arg;
   for (;;) {
-    DBG.printf("S3 alive connected=%d bytes=%lu packets=%lu\n", (int)s_p4_connected,
-               (unsigned long)s_bytes_rx, (unsigned long)s_packets_ok);
+    DBG.printf("S3 alive connected=%d bytes=%lu ok=%lu bad=%lu\n", (int)s_p4_connected,
+               (unsigned long)s_bytes_rx, (unsigned long)s_packets_ok,
+               (unsigned long)s_packets_bad);
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }

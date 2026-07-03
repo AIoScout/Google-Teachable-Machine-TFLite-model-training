@@ -1,6 +1,6 @@
-# S3_UART_Receiver (ESP32-S3)
+# S3\_UART\_Receiver (ESP32-S3)
 
-This sketch receives 8-byte inference packets from ESP32-P4 over UART and prints the decoded result.
+This sketch receives 9-byte inference packets from ESP32-P4 over UART and prints the decoded result.
 
 It also includes a simple **P4 presence check**:
 
@@ -22,16 +22,16 @@ Then connect UART:
 
 ## UART pins used in this project
 
-The current default pins are defined in [S3_UART_Receiver.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/S3_UART_Receiver.ino):
+The current default pins are defined in [S3\_UART\_Receiver.ino](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/S3_UART_Receiver.ino):
 
 - UART (from P4): `Serial1`, **RX=GPIO44**, **TX=GPIO43**, **921600 baud**
 - Debug log: `Serial` (USB CDC), **115200 baud**
 
 ## Arduino IDE settings (ESP32-S3)
 
-Use the Arduino IDE Tools menu settings shown in [setting_s3.png](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/setting_s3.png).
+Use the Arduino IDE Tools menu settings shown in [setting\_s3.png](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/setting_s3.png).
 
-![setting_s3](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/setting_s3.png)
+![setting\_s3](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/setting_s3.png)
 
 ## P4 presence check (analog)
 
@@ -41,7 +41,7 @@ S3 waits for:
 
 After that, it starts UART and begins parsing label packets.
 
-## Packet format (8 bytes)
+## Packet format (9 bytes)
 
 - Byte0: `0xAA`
 - Byte1: `0x55`
@@ -50,6 +50,7 @@ After that, it starts UART and begins parsing label packets.
 - Byte5: `label_id` (uint8)
 - Byte6: `confidence` (uint8)
 - Byte7: `flags` (uint8, bit0 = stop)
+- Byte8: `checksum` (uint8, XOR of Byte0..Byte7)
 
 ## Label names
 
