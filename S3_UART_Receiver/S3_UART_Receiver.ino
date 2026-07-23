@@ -136,6 +136,16 @@ static bool read_packet(Packet *out) {
   return false;
 }
 
+static const char* phase_name_from_flags(uint8_t flags) {
+  if (flags >= 2) {
+    return "sign_ready";
+  }
+  if (flags >= 1) {
+    return "junction_ready";
+  }
+  return "pending";
+}
+
 static void detect_task(void *arg) {
   (void)arg;
   wait_for_p4_connected_blocking();
@@ -174,7 +184,9 @@ static void uart_task(void *arg) {
       DBG.print(" conf=");
       DBG.print(p.confidence);
       DBG.print(" flags=0x");
-      DBG.println(p.flags, HEX);
+        DBG.print(p.flags, HEX);
+        DBG.print(" phase=");
+        DBG.println(phase_name_from_flags(p.flags));
     } else {
       const uint32_t now = millis();
       if (now - last_avail_ms >= 1000) {

@@ -49,7 +49,10 @@ After that, it starts UART and begins parsing label packets.
 - Byte3-4: `frame_id` (uint16, little-endian)
 - Byte5: `label_id` (uint8)
 - Byte6: `confidence` (uint8)
-- Byte7: `flags` (uint8, bit0 = stop)
+- Byte7: `flags` (uint8, stage state)
+  - `0`: pending / not stable enough yet
+  - `1`: junction stage accepted
+  - `2`: sign stage accepted
 - Byte8: `checksum` (uint8, XOR of Byte0..Byte7)
 
 ## Label names
