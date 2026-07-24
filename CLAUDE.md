@@ -25,6 +25,7 @@ Non-submodule directories:
 ```
 IMX219 (MIPI CSI-2) → ESP32-P4 → UART (0xAA 0x55 0xAA + 96×96 bytes, 921600 baud)
                                     ├── ESP32-S3 (UART receiver, prints labels)
+                                    │       └── S3 → P4 control: 0xAA 0x55 0x02 + cmd + csum (ACK_STOP / RESUME_JUNCTION)
                                     └── TMConnector (Processing) → WebSocket :8889 → Teachable Machine
                                              │
                                     AItraining (Python/Streamlit) ← serial or WebSocket
@@ -35,6 +36,8 @@ IMX219 (MIPI CSI-2) → ESP32-P4 → UART (0xAA 0x55 0xAA + 96×96 bytes, 921600
 ```
 
 The serial sync protocol uses a 3-byte header (`0xAA 0x55 0xAA`) followed by `side × side` raw grayscale bytes. The TFLite sketch also sends 9-byte inference result packets over UART to the S3 receiver: `0xAA 0x55 0x01` + frame_id (LE uint16) + label_id (uint8) + confidence (uint8) + flags (uint8) + checksum (XOR).
+
+The S3 can send 5-byte control packets back to P4: `0xAA 0x55 0x02` + command (uint8) + checksum (XOR). Commands: `0x01` = ACK_STOP (confirmed sign, P4 stops TX), `0x02` = RESUME_JUNCTION (tasks done, P4 resumes TX + switches to junction crop mode).
 
 ## Build & Run Commands
 
@@ -74,6 +77,35 @@ Requires a **custom Arduino board core** for ESP32-P4 — install from `arduino/
 Open `TMConnector/TM_Connector/TM_Connector.pde` in Processing IDE. Requires libraries: `Websockets` and `ControlP5` (install via Tools → Add Tool → Libraries).
 
 ## Key Patterns
+
+### Bidirectional P4 ↔ S3 Communication
+
+The P4 and S3 share a bidirectional UART link at 921600 baud. P4 uses `HardwareSerial(1)` (RX=10, TX=11), S3 uses `Serial0` (RX=44, TX=43).
+
+**P4 → S3 (inference results, 9 bytes):**
+`0xAA 0x55 0x01` + frame_id(LE uint16) + label_id(uint8) + confidence(uint8) + flags(uint8) + checksum(XOR Byte0..7)
+
+**S3 → P4 (control commands, 5 bytes):**
+`0xAA 0x55 0x02` + command(uint8) + checksum(XOR Byte0..3)
+
+Commands:
+- `0x01` (`kCtrlAckStop`): S3 confirmed a sign → P4 calls `uart_control_disable()` to stop TX
+- `0x02` (`kCtrlResumeJunction`): S3 tasks done → P4 calls `uart_control_enable()` + sets `s_detection_state=0` + `s_no_sign_frames=0` (switches to junction crop mode)
+
+**P4 FreeRTOS UART tasks:**
+
+| Task | Core | Priority | Stack | Role |
+|---|---|---|---|---|
+| `uart_tx` | 0 | 2 | 4 KB | Sends inference packets; drops when `s_transmit_enabled == false` |
+| `uart_rx` | 0 | 2 | 4 KB | Reads control packets from S3; sets `s_transmit_enabled` + `s_detection_state` |
+
+**TX gating:** `uart_control_enable()` / `uart_control_disable()` set `volatile bool s_transmit_enabled`. When disabled, `uart_tx_task` drains the queue (no backpressure) but doesn't write to UART. Inference, crop mode, and SD logging continue unaffected.
+
+**S3 sign confirmation:** Tracks consecutive high-confidence frames in `uart_task`:
+- `kSignConfirmFrames` (5): consecutive frames of same sign class needed
+- `kSignConfirmConfidence` (180): minimum confidence (~70%)
+- On confirm: sends ACK_STOP → waits `kTaskDurationMs` (3000ms) → sends RESUME_JUNCTION
+- Replace the `vTaskDelay(kTaskDurationMs)` with real task logic (display, actuator, etc.)
 
 ### Model Training & Export Pipeline
 

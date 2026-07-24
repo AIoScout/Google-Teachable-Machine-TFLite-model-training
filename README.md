@@ -7,7 +7,8 @@ This project uses **ESP32-P4 + IMX219 (MIPI CSI-2)** to stream **96x96 grayscale
 - **ESP32-P4-IMX219-PoC**: ESP-IDF project that captures IMX219 frames and can output 96x96 grayscale over Serial.
 - **TMConnector**: Processing script. It receives Serial data, displays a preview, and forwards images to the web interface via WebSockets.
 - **AItraining**: The local training platform
-- **TFLite**: Arduino sketch combining IMX219 + TensorFlow Lite, with optional frame saving (SD_MMC or FFat).
+- **TFLite**: Arduino sketch combining IMX219 + TensorFlow Lite, with optional frame saving (SD_MMC or FFat). Includes bidirectional UART control with ESP32-S3.
+- **S3_UART_Receiver**: Arduino sketch for ESP32-S3 that receives inference packets from P4 and sends control messages back (ACK_STOP / RESUME_JUNCTION).
 - arduino: The customized board core for CSI camera and TensorFlow Lite in the esp32p4
 - **SDReader**: SD_MMC-only test sketch for the on-board MicroSD/TF slot.
 - **FFatReader**: FFat (flash FAT partition) export/clean tool (Serial or USB MSC mode).
@@ -123,3 +124,4 @@ When FFat is full, the TFLite sketch will stop saving new frames and keep runnin
 - **Native Resolution**: Uses 96x96 resolution directly from the hardware, which is the standard input size for Teachable Machine. No extra cropping required.
 - **Baud Rate**: Use **921600** for the Arduino examples in this repo.
 - **Synchronization**: Uses a built-in `0xAA 0x55 0xAA` sync header to prevent image shifting or tearing.
+- **Bidirectional P4 ↔ S3 Control**: After S3 confirms a sign (N consecutive high-confidence frames), it sends `ACK_STOP` to pause P4 transmission, performs its tasks, then sends `RESUME_JUNCTION` to resume with junction crop mode. See [S3_UART_Receiver/README.md](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/README.md) for protocol details.
