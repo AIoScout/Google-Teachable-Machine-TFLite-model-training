@@ -2,7 +2,7 @@
 
 #include "model_settings.h"
 
-static constexpr int kDebugBaud = 115200;
+static constexpr int kDebugBaud = 921600;
 static constexpr int kUartBaud = 921600;
 static constexpr int kUartRxPin = 44;
 static constexpr int kUartTxPin = 43;
@@ -21,8 +21,10 @@ static constexpr uint8_t kCtrlResumeJunction = 0x02;  // done tasks → resume +
 
 // Sign confirmation: require N consecutive frames of the same sign class
 // with confidence above threshold before sending ACK_STOP.
+// Threshold is set low (120/255 ≈ 47%) because int8-quantized models on
+// ESP32-P4 often produce subdued confidence scores.  Tune per model.
 static constexpr int kSignConfirmFrames = 5;
-static constexpr uint8_t kSignConfirmConfidence = 180;  // 180/255 ≈ 70%
+static constexpr uint8_t kSignConfirmConfidence = 120;  // 120/255 ≈ 47%
 
 #define UartFromP4 Serial0
 #define DBG Serial
@@ -240,8 +242,44 @@ static void uart_task(void *arg) {
             DBG.printf("SIGN CONFIRMED: label=%d(%s) conf=%d after %d frames\n",
                        p.label_id, label, p.confidence, s_consecutive_sign_frames);
 
-            // Step 1: Tell P4 to stop transmitting
-            send_control_packet(kCtrlAckStop);
+            // Step 1: Tell P4 to stop transmitting.
+            // Send up to 3 times; verify P4 actually stopped by watching
+            // for silence on the RX line.  At 921600 baud, adjacent-pin
+            // cross-talk can corrupt control packets, so retry is essential.
+            bool p4_stopped = false;
+            for (int retry = 0; retry < 3 && !p4_stopped; retry++) {
+              if (retry > 0) {
+                DBG.printf("S3: ACK_STOP retry %d/3\n", retry + 1);
+                vTaskDelay(pdMS_TO_TICKS(50));
+              }
+              send_control_packet(kCtrlAckStop);
+
+              // Wait up to 300 ms for P4 to go silent
+              uint32_t wait_start = millis();
+              while (millis() - wait_start < 300) {
+                vTaskDelay(pdMS_TO_TICKS(30));
+                // Drain any in-flight bytes that were already queued
+                while (UartFromP4.available() > 0) {
+                  (void)UartFromP4.read();
+                }
+                vTaskDelay(pdMS_TO_TICKS(50));
+                // After draining + 50ms silence, check if P4 has stopped
+                if (UartFromP4.available() == 0) {
+                  // Another 100ms of silence to be sure
+                  vTaskDelay(pdMS_TO_TICKS(100));
+                  if (UartFromP4.available() == 0) {
+                    p4_stopped = true;
+                    DBG.printf("S3: P4 stopped TX after %lu ms (retry=%d)\n",
+                               (unsigned long)(millis() - wait_start), retry);
+                    break;
+                  }
+                }
+              }
+            }
+
+            if (!p4_stopped) {
+              DBG.println("S3: WARNING — P4 did not stop TX after 3 ACK_STOP retries!");
+            }
 
             // Step 2: Do our "tasks" (simulated delay — replace with real work)
             DBG.printf("S3: performing tasks (%lu ms)...\n", (unsigned long)kTaskDurationMs);
