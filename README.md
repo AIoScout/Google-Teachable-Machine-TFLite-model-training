@@ -1,17 +1,16 @@
-# ESP32-P4 IMX219 Teachable Machine Camera Uploader
+# ESP32-P4 IMX219 — Blue/Purple Sign Detection
 
-This project uses **ESP32-P4 + IMX219 (MIPI CSI-2)** to stream **96x96 grayscale** frames to Google Teachable Machine (Image Project) for model training.
+ESP32-P4 + IMX219 (MIPI CSI-2) pipeline for detecting blue/purple geometric signs using **B-G colour-difference preprocessing** and TFLite int8 inference. Two ESP32 boards: P4 runs camera + inference, S3 receives results and controls the P4 via bidirectional UART.
 
 ## Project Structure
 
-- **ESP32-P4-IMX219-PoC**: ESP-IDF project that captures IMX219 frames and can output 96x96 grayscale over Serial.
-- **TMConnector**: Processing script. It receives Serial data, displays a preview, and forwards images to the web interface via WebSockets.
-- **AItraining**: The local training platform
-- **TFLite**: Arduino sketch combining IMX219 + TensorFlow Lite, with optional frame saving (SD_MMC or FFat). Includes bidirectional UART control with ESP32-S3.
-- **S3_UART_Receiver**: Arduino sketch for ESP32-S3 that receives inference packets from P4 and sends control messages back (ACK_STOP / RESUME_JUNCTION).
-- arduino: The customized board core for CSI camera and TensorFlow Lite in the esp32p4
-- **SDReader**: SD_MMC-only test sketch for the on-board MicroSD/TF slot.
-- **FFatReader**: FFat (flash FAT partition) export/clean tool (Serial or USB MSC mode).
+- **TFLite**: Arduino sketch — on-device inference: B-G pipeline → TFLite → UART labels to S3
+- **S3_UART_Receiver**: Arduino sketch — receives inference packets, confirms signs, sends ACK_STOP/RESUME_JUNCTION back to P4
+- **AItraining**: Python/Streamlit desktop app for data collection (from P4 serial or webcam), B-G preprocessing, model training, and export
+- **ESP32-P4-IMX219-PoC**: ESP-IDF project with raw camera streaming (legacy)
+- **TMConnector**: Processing sketch bridging serial → WebSocket for Google Teachable Machine (legacy)
+- **arduino**: Custom ESP32-P4 Arduino board core (zipped, install guide in `CORE_REBUILD.md`)
+- **SDReader** / **FFatReader**: Storage test/utility sketches
 
 ## Setup Instructions for Remote AI training 
 
@@ -121,7 +120,10 @@ When FFat is full, the TFLite sketch will stop saving new frames and keep runnin
 
 ## Key Features
 
-- **Native Resolution**: Uses 96x96 resolution directly from the hardware, which is the standard input size for Teachable Machine. No extra cropping required.
-- **Baud Rate**: Use **921600** for the Arduino examples in this repo.
-- **Synchronization**: Uses a built-in `0xAA 0x55 0xAA` sync header to prevent image shifting or tearing.
-- **Bidirectional P4 ↔ S3 Control**: After S3 confirms a sign (N consecutive high-confidence frames), it sends `ACK_STOP` to pause P4 transmission, performs its tasks, then sends `RESUME_JUNCTION` to resume with junction crop mode. See [S3_UART_Receiver/README.md](file:///Users/koil/Google-Teachable-Machine-TFLite-model-training/S3_UART_Receiver/README.md) for protocol details.
+- **B-G pipeline + auto-crop**: B-G extraction → blur → contrast stretch → blob detection → auto-crop. Identical on P4 (C++) and AItraining (Python). See `CLAUDE.md` for full 13-step pipeline.
+- **Auto crop**: Finds the sign automatically via morphological blob detection. Falls back to full-frame when no sign is detected.
+- **WB correction**: Software white-balance (R×2.0, B×2.0) compensates for sensor green tint. Applied in library (`rgb_wb`), TFLite.ino, and AItraining.
+- **Bidirectional P4 ↔ S3**: S3 confirms signs and sends `ACK_STOP` / `RESUME_JUNCTION`. See `S3_UART_Receiver/README.md`.
+- **RGB data collection**: `IMX219_RGB_Serial` example sends WB-corrected 96×96×3 RGB. AItraining "device" source receives and saves raw images.
+- **Baud rates**: 921600 (P4↔S3, P4 debug), 115200 (S3 debug).
+- **Sync header**: `0xAA 0x55 0xAA` on all serial streams.

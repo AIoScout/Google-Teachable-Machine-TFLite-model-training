@@ -172,16 +172,6 @@ static bool read_packet(Packet *out) {
   return false;
 }
 
-static const char* phase_name_from_flags(uint8_t flags) {
-  if (flags >= 2) {
-    return "sign_ready";
-  }
-  if (flags >= 1) {
-    return "junction_ready";
-  }
-  return "pending";
-}
-
 static void detect_task(void *arg) {
   (void)arg;
   wait_for_p4_connected_blocking();
@@ -219,120 +209,87 @@ static void uart_task(void *arg) {
       DBG.print(")");
       DBG.print(" conf=");
       DBG.print(p.confidence);
-      DBG.print(" flags=0x");
-        DBG.print(p.flags, HEX);
-        DBG.print(" phase=");
-        DBG.println(phase_name_from_flags(p.flags));
 
       // ── Sign confirmation state machine ──
-      // Only trigger when P4 is in sign_ready phase (flags >= 2) and we
-      // haven't already confirmed a sign this cycle.
-      if (!s_sign_confirmed && p.flags >= 2 && p.confidence >= kSignConfirmConfidence) {
-        // Check if this is a sign class (kClassTypes == 0).
-        if (p.label_id < kCategoryCount && kClassTypes[p.label_id] == 0) {
-          if (p.label_id == s_last_sign_label) {
-            s_consecutive_sign_frames++;
-          } else {
-            s_last_sign_label = p.label_id;
-            s_consecutive_sign_frames = 1;
-          }
+      // With the B-G pipeline every frame is a sign-detection frame
+      // (no junction/sign phase distinction).  Confirm when the same
+      // label appears for N consecutive frames with confidence above threshold.
+      if (!s_sign_confirmed && p.confidence >= kSignConfirmConfidence) {
+        if (p.label_id == s_last_sign_label) {
+          s_consecutive_sign_frames++;
+        } else {
+          s_last_sign_label = p.label_id;
+          s_consecutive_sign_frames = 1;
+        }
 
-          if (s_consecutive_sign_frames >= kSignConfirmFrames) {
-            s_sign_confirmed = true;
-            DBG.printf("SIGN CONFIRMED: label=%d(%s) conf=%d after %d frames\n",
-                       p.label_id, label, p.confidence, s_consecutive_sign_frames);
+        if (s_consecutive_sign_frames >= kSignConfirmFrames) {
+          s_sign_confirmed = true;
+          DBG.printf("SIGN CONFIRMED: label=%d(%s) conf=%d after %d frames\n",
+                     p.label_id, label, p.confidence, s_consecutive_sign_frames);
 
-            // Step 1: Tell P4 to stop transmitting.
-            // Send up to 3 times; verify P4 actually stopped by watching
-            // for silence on the RX line.  At 921600 baud, adjacent-pin
-            // cross-talk can corrupt control packets, so retry is essential.
-            bool p4_stopped = false;
-            for (int retry = 0; retry < 3 && !p4_stopped; retry++) {
-              if (retry > 0) {
-                DBG.printf("S3: ACK_STOP retry %d/3\n", retry + 1);
-                vTaskDelay(pdMS_TO_TICKS(50));
-              }
-              send_control_packet(kCtrlAckStop);
-
-              // Wait up to 300 ms for P4 to go silent
-              uint32_t wait_start = millis();
-              while (millis() - wait_start < 300) {
-                vTaskDelay(pdMS_TO_TICKS(30));
-                // Drain any in-flight bytes that were already queued
-                while (UartFromP4.available() > 0) {
-                  (void)UartFromP4.read();
-                }
-                vTaskDelay(pdMS_TO_TICKS(50));
-                // After draining + 50ms silence, check if P4 has stopped
-                if (UartFromP4.available() == 0) {
-                  // Another 100ms of silence to be sure
-                  vTaskDelay(pdMS_TO_TICKS(100));
-                  if (UartFromP4.available() == 0) {
-                    p4_stopped = true;
-                    DBG.printf("S3: P4 stopped TX after %lu ms (retry=%d)\n",
-                               (unsigned long)(millis() - wait_start), retry);
-                    break;
-                  }
-                }
-              }
+          // Step 1: Tell P4 to stop transmitting
+          bool p4_stopped = false;
+          for (int retry = 0; retry < 3 && !p4_stopped; retry++) {
+            if (retry > 0) {
+              DBG.printf("S3: ACK_STOP retry %d/3\n", retry + 1);
+              vTaskDelay(pdMS_TO_TICKS(50));
             }
-
-            if (!p4_stopped) {
-              DBG.println("S3: WARNING — P4 did not stop TX after 3 ACK_STOP retries!");
-            }
-
-            // Step 2: Do our "tasks" (simulated delay — replace with real work)
-            DBG.printf("S3: performing tasks (%lu ms)...\n", (unsigned long)kTaskDurationMs);
-            vTaskDelay(pdMS_TO_TICKS(kTaskDurationMs));
-
-            // Step 3: Tell P4 to resume with junction mode.
-            // Send up to 3 times with a short gap; if P4 misses one packet
-            // (noise, RX overrun, etc.) the next will get through.
-            bool p4_resumed = false;
-            for (int retry = 0; retry < 3 && !p4_resumed; retry++) {
-              if (retry > 0) {
-                DBG.printf("S3: RESUME_JUNCTION retry %d/3\n", retry + 1);
+            send_control_packet(kCtrlAckStop);
+            uint32_t wait_start = millis();
+            while (millis() - wait_start < 300) {
+              vTaskDelay(pdMS_TO_TICKS(30));
+              while (UartFromP4.available() > 0) (void)UartFromP4.read();
+              vTaskDelay(pdMS_TO_TICKS(50));
+              if (UartFromP4.available() == 0) {
                 vTaskDelay(pdMS_TO_TICKS(100));
-              }
-              send_control_packet(kCtrlResumeJunction);
-
-              // Wait up to 500 ms for P4 to start sending data again
-              uint32_t wait_start = millis();
-              while (millis() - wait_start < 500) {
-                vTaskDelay(pdMS_TO_TICKS(20));
-                if (UartFromP4.available() > 0) {
-                  p4_resumed = true;
-                  DBG.printf("S3: P4 resumed TX after %lu ms (retry=%d)\n",
+                if (UartFromP4.available() == 0) {
+                  p4_stopped = true;
+                  DBG.printf("S3: P4 stopped TX after %lu ms (retry=%d)\n",
                              (unsigned long)(millis() - wait_start), retry);
                   break;
                 }
               }
             }
-
-            if (!p4_resumed) {
-              DBG.println("S3: WARNING — P4 did not resume TX after 3 retries!");
-            }
-
-            // Reset confirmation state for next cycle
-            s_sign_confirmed = false;
-            s_last_sign_label = 0xFF;
-            s_consecutive_sign_frames = 0;
-            DBG.println("S3: cycle complete, ready for next sign");
           }
-        } else {
-          // Not a sign class — reset consecutive counter
-          s_last_sign_label = 0xFF;
-          s_consecutive_sign_frames = 0;
-        }
-      } else if (p.flags < 2) {
-        // P4 is back in junction mode — reset confirmation for next cycle
-        if (s_sign_confirmed) {
-          // This shouldn't normally happen (P4 should already be stopped),
-          // but handle it gracefully.
+          if (!p4_stopped)
+            DBG.println("S3: WARNING — P4 did not stop TX after 3 ACK_STOP retries!");
+
+          // Step 2: Do our tasks
+          DBG.printf("S3: performing tasks (%lu ms)...\n", (unsigned long)kTaskDurationMs);
+          vTaskDelay(pdMS_TO_TICKS(kTaskDurationMs));
+
+          // Step 3: Tell P4 to resume
+          bool p4_resumed = false;
+          for (int retry = 0; retry < 3 && !p4_resumed; retry++) {
+            if (retry > 0) {
+              DBG.printf("S3: RESUME_JUNCTION retry %d/3\n", retry + 1);
+              vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            send_control_packet(kCtrlResumeJunction);
+            uint32_t wait_start = millis();
+            while (millis() - wait_start < 500) {
+              vTaskDelay(pdMS_TO_TICKS(20));
+              if (UartFromP4.available() > 0) {
+                p4_resumed = true;
+                DBG.printf("S3: P4 resumed TX after %lu ms (retry=%d)\n",
+                           (unsigned long)(millis() - wait_start), retry);
+                break;
+              }
+            }
+          }
+          if (!p4_resumed)
+            DBG.println("S3: WARNING — P4 did not resume TX after 3 retries!");
+
+          // Reset for next cycle
           s_sign_confirmed = false;
           s_last_sign_label = 0xFF;
           s_consecutive_sign_frames = 0;
+          DBG.println("S3: cycle complete, ready for next sign");
         }
+      } else {
+        // Confidence too low or different label — reset counter
+        s_last_sign_label = 0xFF;
+        s_consecutive_sign_frames = 0;
       }
     } else {
       const uint32_t now = millis();
