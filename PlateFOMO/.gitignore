@@ -1,0 +1,12 @@
+# Don't commit the real model binary (it's large and binary).
+# Replace with a placeholder before committing, and add the real
+# model as a build artifact or Git LFS file.
+tm_model_data.cpp
+
+# Arduino build artifacts
+build/
+*.elf
+*.bin
+
+# macOS
+.DS_Store
