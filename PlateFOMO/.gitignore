@@ -1,7 +1,9 @@
-# Don't commit the real model binary (it's large and binary).
-# Replace with a placeholder before committing, and add the real
-# model as a build artifact or Git LFS file.
-tm_model_data.cpp
+# Don't commit the real trained model data (it's large and binary).
+# Use Git LFS or store externally for the actual model bytes.
+# The placeholder tm_model_data.cpp IS committed — replace it with
+# your trained model when building.
+# Uncomment the next line only when you've replaced the placeholder:
+# tm_model_data.cpp
 
 # Arduino build artifacts
 build/
