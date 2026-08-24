@@ -37,6 +37,27 @@ struct Packet {
   uint8_t flags;
 };
 
+// ── flags contract (shared with TFLite.ino on P4) ───────────────────────
+//   flags byte = [high nibble: OOD status] [low nibble: sign_ready]
+//   low  nibble == 0x2  →  sign_ready (legacy value, unchanged)
+//   high nibble == 0x0  →  in-distribution (real sign)
+//   high nibble == 0xF  →  OUT of distribution (No Sign)
+//
+// Receivers MUST use these helpers — NEVER trust label_id/confidence when
+// pkt_is_no_sign() returns true, even if confidence is close to 255.
+static constexpr uint8_t kFlagsMaskSignReady = 0x0F;
+static constexpr uint8_t kFlagsMaskOodStatus = 0xF0;
+static constexpr uint8_t kFlagsSignReady     = 0x02;
+static constexpr uint8_t kFlagsOodNoSign     = 0xF0;
+
+static inline bool pkt_is_real_sign(uint8_t flags) {
+  return (flags & kFlagsMaskSignReady) == kFlagsSignReady &&
+         (flags & kFlagsMaskOodStatus) == 0x00;
+}
+static inline bool pkt_is_no_sign(uint8_t flags) {
+  return (flags & kFlagsMaskOodStatus) == kFlagsOodNoSign;
+}
+
 static uint32_t s_bytes_rx = 0;
 static uint32_t s_packets_ok = 0;
 static uint32_t s_packets_bad = 0;
@@ -195,26 +216,33 @@ static void uart_task(void *arg) {
     Packet p;
     if (read_packet(&p)) {
       s_packets_ok++;
-      const char *label = "Unknown";
-      if (p.label_id < kCategoryCount) {
+      const bool real_sign = pkt_is_real_sign(p.flags);
+      const bool no_sign   = pkt_is_no_sign(p.flags);
+      const char *label = "No Sign";
+      if (real_sign && p.label_id < kCategoryCount) {
         label = kCategoryLabels[p.label_id];
       }
 
       DBG.print("frame=");
       DBG.print(p.frame_id);
       DBG.print(" label=");
-      DBG.print(p.label_id);
+      DBG.print(real_sign ? (int)p.label_id : -1);
       DBG.print("(");
       DBG.print(label);
       DBG.print(")");
       DBG.print(" conf=");
-      DBG.print(p.confidence);
+      DBG.print(real_sign ? (int)p.confidence : 0);
+      DBG.print(" flags=0x");
+      DBG.print(p.flags, 16);
+      DBG.print(no_sign   ? " [NO SIGN (OOD)]" : "");
+      DBG.print(real_sign ? " [REAL SIGN]"     : "");
 
       // ── Sign confirmation state machine ──
-      // With the B-G pipeline every frame is a sign-detection frame
-      // (no junction/sign phase distinction).  Confirm when the same
-      // label appears for N consecutive frames with confidence above threshold.
-      if (!s_sign_confirmed && p.confidence >= kSignConfirmConfidence) {
+      // Real sign only: OOD-suppressed ("No Sign") frames never count, even
+      // if softmax hallucinated a high-confidence label_id + confidence.
+      // This prevents the old bug of 5 consecutive "END" hallucinations on
+      // an empty desk being mis-interpreted as a confirmed sign.
+      if (!s_sign_confirmed && real_sign && p.confidence >= kSignConfirmConfidence) {
         if (p.label_id == s_last_sign_label) {
           s_consecutive_sign_frames++;
         } else {
@@ -224,8 +252,8 @@ static void uart_task(void *arg) {
 
         if (s_consecutive_sign_frames >= kSignConfirmFrames) {
           s_sign_confirmed = true;
-          DBG.printf("SIGN CONFIRMED: label=%d(%s) conf=%d after %d frames\n",
-                     p.label_id, label, p.confidence, s_consecutive_sign_frames);
+          DBG.printf("SIGN CONFIRMED: label=%d(%s) conf=%d after %d frames [flags=0x%02X]\n",
+                     p.label_id, label, p.confidence, s_consecutive_sign_frames, p.flags);
 
           // Step 1: Tell P4 to stop transmitting
           bool p4_stopped = false;
@@ -287,7 +315,9 @@ static void uart_task(void *arg) {
           DBG.println("S3: cycle complete, ready for next sign");
         }
       } else {
-        // Confidence too low or different label — reset counter
+        // No-Sign (OOD) frame, confidence too low, or different label — reset counter.
+        // A burst of OOD frames MUST reset the count so we don't accumulate
+        // hallucinated labels across scene cuts.
         s_last_sign_label = 0xFF;
         s_consecutive_sign_frames = 0;
       }
