@@ -23,23 +23,38 @@ Non-submodule directories:
 
 ## Image Processing Pipeline
 
-B-G extraction + auto-crop runs identically on P4 (C++) and in AItraining (Python):
+The ACTIVE pipeline (device `GetImage` BG mode, host live predict, and the
+training cache — verified 2026-08-26, all three produce the same transform):
 
 ```
-1. Camera RGB → Library: demosaic + downsize to 96×96×3
-2. WB correction:  R×2.0, B×2.0  (compensates for sensor green tint)
-3. B-G extraction: diff = B - G   (signed int16)
-4. Non-black mask: if R<10 & G<10 & B<10 → push diff to 0  (ignore shadows)
-5. 5×5 Box Blur (C++) / GaussianBlur (Python)
-6. Contrast stretch: (diff - min) / (max - min) × 255    skip if span < 20
-7. Binary mask: stretched > 80 → white (sign), else black
-8. Morphology: erode 1× + dilate 2×  (remove noise, reconnect fragments)
-9. Blob detection: largest connected component → bbox
-10. Crop: square bbox + 20% padding → nearest-neighbour resize to 96×96
-11. B-G grayscale: (diff + 255) / 2 → uint8
-12. Contrast stretch: span ≥ 24 → expand to full [0,255]
-13. int8 conversion: gray - 128 → TFLite input
+1. Camera RGB → Library: demosaic + downsize to 96×96×3 (raw, NO WB)
+2. Crop: center 60 % square (side = floor(96*0.60) = 57, box [20,77))
+       — Python _center_bbox(frac=0.60) / device BG_FALLBACK_CENTER_FRAC
+       (the G-channel dark/lum mask and _focus_bbox search are preview aids
+        only; they never touch the model-input pixels)
+3. BT.601 luminance of the crop: (r*30 + g*59 + b*11) / 100  (no WB)
+4. Bilinear resize to 96×96  (device float version ≈ PIL BILINEAR, ±1 LSB)
+5. Contrast stretch: span ≥ 24 → expand to full [0,255]  (round half up)
+6. int8 conversion: gray - 128 → TFLite input (scale 1/255, zp -128)
 ```
+
+Training data = `IMX219_Grayscale_Serial` stream (library `esp32_p4_imx219_gray()`
+= BT.601 of RAW demosaiced RGB, **no white balance**). `use_preprocessed_dataset`
+is hardcoded true, so the training cache rebuild (`fast_mode=True`) is the
+canonical transform; the model never sees `_focus_bbox` crops.
+
+**Dead / legacy paths (do NOT "fix" device code to match these):**
+- `_find_bg_roi` (B-G blob auto-crop, image_preprocess.py) — no callers.
+- Device B-G blob search — compiled out (`BG_ENABLE_BLOB_SEARCH 0` default).
+- `preprocess_array` / `focus_and_enhance_array` — dead + latent NameError.
+- Host `_focus_bbox` live crop — replaced by `fast_mode=True` in
+  `prepare_inference_inputs` (it crops ~13 px right of the sign and flipped
+  24/40 LEFT samples to RIGHT on the training set).
+
+**WB ×2.0 (R/B) exists ONLY in the RGB data-collection path** (`CameraSendRgbToSerialWb(200,200)`,
+`IMX219_RGB_Serial` example — used by purple-sign projects). The grayscale
+pipeline applies no WB anywhere; adding WB to the model input of a
+grayscale-trained model is a distribution mismatch.
 
 ## ESP32_P4_IMX219 Library API
 
@@ -75,11 +90,17 @@ WB gains: `200` = ×2.0. Must be identical across TFLite.ino, example sketch, an
 
 ## AItraining Preprocess Modes
 
-Only two modes remain:
-- **`auto_by_label`** (default): B-G → auto blob detection → crop → resize
-- **`manual_roi`**: B-G → user-defined ROI → crop → resize
+Two modes remain:
+- **`auto_by_label`** (default): G-channel dark/lum mask (stats/preview only)
+  → **center 60 % crop** (fast_mode=True, matches device + training cache)
+- **`manual_roi`**: user-defined ROI → crop → resize
 
-B-G is always applied. The mode only controls ROI selection.
+No B-G anywhere in the live path. The dark/lum mask only drives previews and
+the sign_pct OOD gate. Per-class `bg_dark_thresh`/`bg_lum_thresh` from
+class_preprocess are used by the training path (`preprocess_for_label`), not
+by live predict (which uses 0/100 defaults); device mask defaults (0/100) and
+OOD gates (sign_pct [0.3,70] %, max_prob ≥ 0.60, entropy ≤ 0.70) match live
+predict.
 
 ## Build & Run Commands
 
@@ -103,5 +124,5 @@ cd AItraining && pip install -r requirements.txt && python desktop_launcher.py
 - **Python 3.13 + PyInstaller**: crashes. Use Python ≤ 3.12.
 - **New P4 board**: FFat unavailable; use `StorageBackend::SdMmc`.
 - **GPIO10/GPIO11 crosstalk**: `pinMode(kUartRxPin, INPUT_PULLDOWN)` before `UartToS3.begin()`.
-- **Pipeline consistency**: Any change to `image_provider.cpp` MUST be mirrored in `image_preprocess.py` and vice versa. WB gains, thresholds, and blur kernel size must match.
-- **WB gains**: `200` (×2.0) in three places — `image_provider.cpp`, `IMX219_RGB_Serial.ino`, `image_preprocess.py`.
+- **Pipeline consistency**: Any change to `image_provider.cpp` MUST be mirrored in `image_preprocess.py` and vice versa. The canonical transform is: center-60 % crop → BT.601 (30/59/11) of raw no-WB RGB → bilinear → contrast stretch (span ≥ 24) → int8 gray−128.
+- **WB gains**: `200` (×2.0) applies ONLY to the RGB data-collection path (`CameraSendRgbToSerialWb` / `IMX219_RGB_Serial`) used by purple-sign projects. The grayscale pipeline (device model input, training cache) must stay at 100/100 passthrough.

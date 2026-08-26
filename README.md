@@ -11,9 +11,9 @@ G-channel → Dark/Lum mask → Shadow-search ROI → Crop → Resize → Contra
 ```
 
 1. **G-channel**: Raw green channel as luminance (best SNR from IMX219 sensor)
-2. **Dark/Lum mask**: `is_sign = (G > dark_thresh) & (G < lum_thresh)` — defaults 0/100
-3. **Shadow-search**: `_focus_bbox()` finds dark objects with edges in center 70% of frame
-4. **Resize**: Configurable (48–192, default 96×96)
+2. **Dark/Lum mask**: `is_sign = (G > dark_thresh) & (G < lum_thresh)` — defaults 0/100 (preview + sign_pct OOD stats only)
+3. **Model input** (training cache = live predict = device firmware): **center 60 % crop** → BT.601 luminance of the raw (no-WB) crop → bilinear 96×96 → contrast stretch (span ≥ 24) → int8 gray−128
+4. **Shadow-search** (`_focus_bbox()`): dark-object + edge search — preview aid only, never touches the model-input pixels
 5. **Contrast stretch**: Linear to full [0,255]
 
 ## Preview Toggles (independent states, they stack)
@@ -55,14 +55,15 @@ The `/preview/predict` endpoint returns four image variants:
 
 ## MCU (TFLite)
 
-- Shadow-search blob detection in center window
-- Fixed ×2.0 WB via `esp32_p4_imx219_rgb_wb(200, 200)`
+- Center 60 % crop (`BG_FALLBACK_CENTER_FRAC=0.60`, blob search compiled out) — identical geometry to the host training cache
+- No WB — model input is BT.601 luminance of the raw sensor RGB (matches the grayscale serial stream the app trains on)
+- OOD gating aligned with the host preview gates: sign_pct 0.3–70 %, max_prob ≥ 0.60, entropy ≤ 0.70
 - Export generates `model_resolver.h` from the actual ops in the .tflite
 
-## Data Collection Sketch
+## Data Collection Sketches
 
-- `IMX219_RGB_Serial.ino` — dynamic Gray World AWB with IIR smoothing
-- Raw sensor capture via `esp32_p4_imx219_rgb()`
+- `IMX219_RGB_Serial.ino` — WB-corrected RGB (R×2 / B×2) — used by purple-sign projects
+- `IMX219_Grayscale_Serial` (MODE_GRAY) — BT.601 of raw sensor RGB, **no WB** — this is what the small/upper road-sign projects train on
 
 ## Export Files
 
