@@ -28,12 +28,27 @@ training cache — verified 2026-08-26, all three produce the same transform):
 
 ```
 1. Camera RGB → Library: demosaic + downsize to 96×96×3 (raw, NO WB)
-2. Crop: center 60 % square (side = floor(96*0.60) = 57, box [20,77))
-       — Python _center_bbox(frac=0.60) / device BG_FALLBACK_CENTER_FRAC
-       (the G-channel dark/lum mask and _focus_bbox search are preview aids
-        only; they never touch the model-input pixels)
-3. BT.601 luminance of the crop: (r*30 + g*59 + b*11) / 100  (no WB)
-4. Bilinear resize to 96×96  (device float version ≈ PIL BILINEAR, ±1 LSB)
+2. Crop (model-input window) — two modes, MUST match train/device/host:
+   a) AUTO SEARCH (default, new trainings): shadow-search box — Python
+      _focus_bbox and the device C port (image_provider.cpp find_search_box)
+      are BIT-IDENTICAL (deterministic f32 cumsum blur + f64 geometry +
+      Python round-half-even; verified 65/65 boxes + 20/20 end-to-end
+      frames).  Search input = dark/lum-MASKED G channel (non-sign → 255).
+      Failure → 40 %-side centered fallback box.
+   b) CENTER (legacy, old deployed models): center 60 % square
+      (side = floor(96*0.60) = 57, box [20,77)) — Python _center_bbox(0.60)
+      / device BG_FALLBACK_CENTER_FRAC with BG_ENABLE_FOCUS_SEARCH=0.
+   Host crop_mode: CROP_MODE_AUTO_SEARCH / CROP_MODE_CENTER, saved in the
+   train meta (old metas default to CENTER).  Device: BG_ENABLE_FOCUS_SEARCH
+   (default 1).  RETRAIN after switching the mode.
+3. Bilinear resize of the RGB crop to 96×96 — float32, PIL-style center
+       mapping ((x+0.5)*side/out - 0.5, incl. negative border weights).
+       Device crop_resize_bilinear() and Python _device_crop_resize_bilinear_lum()
+       are BIT-IDENTICAL (same float32 arithmetic + op order; verified against
+       a C transliteration on random frames).
+4. BT.601 luminance of the resampled pixels: (r*30 + g*59 + b*11) / 100,
+       round half up  (no WB).  For grayscale (replicated-channel) inputs this
+       step is an exact identity.
 5. Contrast stretch: span ≥ 24 → expand to full [0,255]  (round half up)
 6. int8 conversion: gray - 128 → TFLite input (scale 1/255, zp -128)
 ```
@@ -100,7 +115,11 @@ the sign_pct OOD gate. Per-class `bg_dark_thresh`/`bg_lum_thresh` from
 class_preprocess are used by the training path (`preprocess_for_label`), not
 by live predict (which uses 0/100 defaults); device mask defaults (0/100) and
 OOD gates (sign_pct [0.3,70] %, max_prob ≥ 0.60, entropy ≤ 0.70) match live
-predict.
+predict.  OOD L2/L3 (max_prob, entropy) are computed from the RAW int8 output
+tensor (`int8 + 128`, clamped, normalised by Σ, natural-log entropy / ln N)
+on BOTH sides — TFLite.ino `ood_is_in_distribution()` and record_controller
+`_preview_predict` use the same float32 math, NOT dequantised softmax
+probabilities.
 
 ## Build & Run Commands
 
@@ -124,5 +143,5 @@ cd AItraining && pip install -r requirements.txt && python desktop_launcher.py
 - **Python 3.13 + PyInstaller**: crashes. Use Python ≤ 3.12.
 - **New P4 board**: FFat unavailable; use `StorageBackend::SdMmc`.
 - **GPIO10/GPIO11 crosstalk**: `pinMode(kUartRxPin, INPUT_PULLDOWN)` before `UartToS3.begin()`.
-- **Pipeline consistency**: Any change to `image_provider.cpp` MUST be mirrored in `image_preprocess.py` and vice versa. The canonical transform is: center-60 % crop → BT.601 (30/59/11) of raw no-WB RGB → bilinear → contrast stretch (span ≥ 24) → int8 gray−128.
+- **Pipeline consistency**: Any change to `image_provider.cpp` MUST be mirrored in `image_preprocess.py` and vice versa. The canonical transform is: crop (auto search box or center 60 %) → bilinear (float32) → BT.601 (30/59/11, round half up) of raw no-WB RGB → contrast stretch (span ≥ 24) → int8 gray−128. The Python mirror `_device_crop_resize_bilinear_lum()` replicates the C++ float32 arithmetic and op order (bit-identical), and the device `find_search_box()` replicates `_focus_bbox()` bit-identically (deterministic f32 cumsum blur + f64 geometry + Python round-half-even — do NOT switch either side back to np.convolve/SIMD math); keep all three in lockstep.
 - **WB gains**: `200` (×2.0) applies ONLY to the RGB data-collection path (`CameraSendRgbToSerialWb` / `IMX219_RGB_Serial`) used by purple-sign projects. The grayscale pipeline (device model input, training cache) must stay at 100/100 passthrough.
