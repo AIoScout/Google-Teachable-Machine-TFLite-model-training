@@ -6,9 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ESP32-P4 + IMX219 camera pipeline for blue/purple sign detection. Uses B-G colour-difference preprocessing, morphological blob detection for auto-crop, and TFLite int8 inference. Targets ESP32-P4 (camera + inference), ESP32-S3 (UART receiver), and desktop (AItraining app).
 
-**Two P4 sketches** share the same camera library:
-- **TFLite.ino** — on-device inference: full pipeline → TFLite → sends labels over UART
+**Four P4 sketches** share the same camera library; the first three share the
+same `image_provider.*`:
+- **`TFLite/TFLite.ino`** — legacy on-device inference: 96×96 sign pipeline → TFLite → labels over UART
+- **`TFLite_OCR/TFLite_OCR.ino`** — single-glyph OCR: 28×28 glyph front-end → TFLite → **same** UART wire format
+- **`TFLite_Sign/TFLite_Sign.ino`** — 3-character road sign: 3-slot split → 3× TFLite invoke → YES/NO verdict over the **same** UART wire format (verdict in the flags high nibble)
 - **IMX219_RGB_Serial** (library example) — data collection: sends WB-corrected 96×96 RGB to AItraining
+
+The three model sketches are **separate self-contained Arduino sketches**, not
+one sketch with a compile-time mode switch.  `TM_OCR_GLYPH_MODEL` and
+`TM_SIGN_OCR_MODEL` in the exported `model_settings.h` record which sketch a
+model belongs to (`ocr` → OCR, `sign_ocr` → Sign, both 0 → legacy), and each
+`.ino` `#error`s if handed another sketch's export.  `image_provider.cpp/.h`,
+`main_functions.h` and `arduino_main.cpp` are duplicated across all three
+folders and **must stay byte-identical** — `TFLite_OCR/tools/sync_check.py`
+enforces it.
 
 ## Repository Structure
 
@@ -18,6 +30,8 @@ Three directories are **git submodules** — changes inside them must be committ
 - `TFLite/` → `koilkl/TFLite` — Arduino sketch with camera + TFLite Micro inference
 
 Non-submodule directories:
+- `TFLite_OCR/` — self-contained single-glyph OCR sketch (28×28 glyph front-end) + the parity/verification tools
+- `TFLite_Sign/` — self-contained 3-character road-sign sketch (sign split front-end + 3× inference + binary verdict)
 - `S3_UART_Receiver/` — Arduino sketch for ESP32-S3: receives labels, sends ACK_STOP / RESUME_JUNCTION
 - `arduino/` — custom Arduino board core for ESP32-P4 (zipped, install via `CORE_REBUILD.md`)
 
@@ -127,8 +141,22 @@ probabilities.
 # AItraining
 cd AItraining && pip install -r requirements.txt && python desktop_launcher.py
 
-# P4 TFLite inference
+# P4 legacy sign inference (96×96)
 # Arduino IDE: open TFLite/TFLite.ino, board=ESP32P4 Dev Module, upload
+# Needs an APP slot >= ~3.6 MB: huge_app (3 MB) is NOT enough for the current
+# model, and no stock 16 MB scheme is either — use a 32 MB scheme or a custom
+# partition table.
+
+# P4 single-glyph OCR inference (28×28) — the same board, a different sketch
+# Arduino IDE: open TFLite_OCR/TFLite_OCR.ino, board=ESP32P4 Dev Module, upload
+# Fits huge_app (1.18 MB app). Each sketch rejects the other sketches' exports
+# at compile time, so a wrong-folder export is a build error, not a silent
+# preprocessing mismatch.
+
+# P4 3-character sign inference (3 × 28×28 slots) — same board, another sketch
+# Arduino IDE: open TFLite_Sign/TFLite_Sign.ino, board=ESP32P4 Dev Module, upload
+# Fits huge_app (1.18 MB app). Needs a sign_ocr export (TM_SIGN_OCR_MODEL 1)
+# carrying kTargetSignSequence / kTargetSignClassIndices / kSignReadingOrder.
 
 # P4 data collection
 # Arduino IDE: Examples → ESP32_P4_IMX219 → IMX219_RGB_Serial, upload
@@ -145,3 +173,5 @@ cd AItraining && pip install -r requirements.txt && python desktop_launcher.py
 - **GPIO10/GPIO11 crosstalk**: `pinMode(kUartRxPin, INPUT_PULLDOWN)` before `UartToS3.begin()`.
 - **Pipeline consistency**: Any change to `image_provider.cpp` MUST be mirrored in `image_preprocess.py` and vice versa. The canonical transform is: crop (auto search box or center 60 %) → bilinear (float32) → BT.601 (30/59/11, round half up) of raw no-WB RGB → contrast stretch (span ≥ 24) → int8 gray−128. The Python mirror `_device_crop_resize_bilinear_lum()` replicates the C++ float32 arithmetic and op order (bit-identical), and the device `find_search_box()` replicates `_focus_bbox()` bit-identically (deterministic f32 cumsum blur + f64 geometry + Python round-half-even — do NOT switch either side back to np.convolve/SIMD math); keep all three in lockstep.
 - **WB gains**: `200` (×2.0) applies ONLY to the RGB data-collection path (`CameraSendRgbToSerialWb` / `IMX219_RGB_Serial`) used by purple-sign projects. The grayscale pipeline (device model input, training cache) must stay at 100/100 passthrough.
+- **Sign front-end parity**: `TFLite_Sign/sign_glyph.c` mirrors `AItraining/ocr_preprocess.py` (`preprocess_sign_sequence` → `split_sign_glyph_boxes` → per-slot `preprocess_glyph`). The Otsu tie rule, the split's merge/split tie-breakers, the ink predicate and the reading order (boxes reversed, **never pixels mirrored**) are part of the contract. `AItraining/tests/test_sign_glyph_parity.py` is the arbiter — keep both sides bit-identical.
+- **Dark/Lum window**: the export stamps `TM_THRESHOLD_WINDOW_EXPORTED`, `kDarkThr`, `kLumThr`; both sketches derive `thresh = adjusted ? clamp(lum-1,1,254) : -1` and `dark_thr = adjusted ? clamp(dark+1,0,255) : 0`. Defaults 0/100 must remain a bit-exact Otsu no-op. The window is applied after the polarity split (`ink &= gray >= dark_thr`); `ocr_glyph.c`'s `*_window` entry points and `sign_glyph.c` implement it.

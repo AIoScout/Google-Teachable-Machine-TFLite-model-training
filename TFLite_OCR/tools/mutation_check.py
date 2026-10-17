@@ -22,7 +22,13 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "ocr_glyph.c"
+REPO = ROOT.parent
+# Mutate the SHIPPED translation unit.  Since the two-sketch split this is
+# unambiguous: ocr_glyph.c exists only in TFLite_OCR/, which is the folder the
+# device compiles.  (It used to live in TFLite/ as a deployment copy — if that
+# file reappears, sync_check.py flags it and this picks the wrong one.)
+SHIPPED = ROOT / "ocr_glyph.c"
+SRC = SHIPPED if SHIPPED.exists() else ROOT / "ocr_glyph.c"
 HOST = ROOT / "tools" / "ocr_glyph_host.c"
 
 # (label, exact old text, replacement) — exact match, so a refactor that
@@ -114,6 +120,7 @@ def main() -> int:
 
     original = SRC.read_text()
     failures = []
+    print(f"mutating: {SRC}")
     print(f"{'mutation':62s} result")
     print("-" * 88)
     with tempfile.TemporaryDirectory() as td:

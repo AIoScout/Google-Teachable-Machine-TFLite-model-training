@@ -47,6 +47,16 @@ from ocr_preprocess import (  # noqa: E402
 CONV = {NORM_STRETCH: 0, NORM_CANON: 1}
 MANIFEST_HEADER = "name\tkind\tw\th\tout_size\tpolarity\tseg\tmin_run\tthresh\tconvention\n"
 
+# Mirror of ocr_glyph.h's frame-size envelope.  The device only ever presents
+# g_frame_side x g_frame_side (96 or 128), so these are not device constraints —
+# they are the point past which the C port refuses a frame outright.  The corpus
+# must stay inside them, because a case the C port refuses is not a parity test;
+# it is a case where "C diverged from Python" only means "Python has no
+# envelope".  Keep in step with ocr_glyph.h (tools/sync_check.py does not read
+# this file, so it is on you).
+OCR_MAX_PIXELS = 65536
+OCR_MAX_W = 1024
+
 
 # ── deterministic drawing helpers (numpy only, no PIL filters) ───────────
 def _blur3(a: np.ndarray) -> np.ndarray:
@@ -147,17 +157,41 @@ def build_cases(app_data: Path | None, n_real: int, seed: int):
     if app_data and n_real > 0:
         pngs = sorted(app_data.rglob("*.png"))
         if pngs:
-            picks = rng.permutation(len(pngs))[:n_real]
             from PIL import Image
-            for i, idx in enumerate(picks):
+            # Draw from the permutation until n_real frames are in hand, rather
+            # than taking the first n_real and dropping the misses: a workspace
+            # root is not a pile of captures, it also holds screenshots and
+            # imported images, and one of those landing in the sample should
+            # cost a substitute rather than a smaller corpus.
+            added = skipped_big = unreadable = 0
+            for idx in rng.permutation(len(pngs)):
+                if added >= n_real:
+                    break
                 try:
                     g = np.asarray(Image.open(pngs[int(idx)]).convert("L"), dtype=np.uint8)
                 except Exception:
+                    unreadable += 1
                     continue
                 if g.ndim != 2 or g.size == 0:
+                    unreadable += 1
                     continue
-                add(f"real{i:04d}", g)
-            print(f"  real captures: {sum(1 for c in cases if c[0].startswith('real'))}")
+                h, w = g.shape[:2]
+                if w * h > OCR_MAX_PIXELS or w > OCR_MAX_W:
+                    # Not a frame the device can produce, and ocr_glyph.c
+                    # returns early on it — so it cannot carry parity
+                    # information, and the host harness' frame buffer is sized
+                    # by the same envelope.  Skipped, counted, never silent.
+                    skipped_big += 1
+                    continue
+                add(f"real{added:04d}", g)
+                added += 1
+            note = ""
+            if skipped_big:
+                note += (f", skipped {skipped_big} larger than the "
+                         f"{OCR_MAX_PIXELS}-px/{OCR_MAX_W}-col envelope")
+            if unreadable:
+                note += f", {unreadable} unreadable"
+            print(f"  real captures: {added}{note}")
 
     # ── degenerate frames ───────────────────────────────────────────────
     for level in range(0, 256, 17):

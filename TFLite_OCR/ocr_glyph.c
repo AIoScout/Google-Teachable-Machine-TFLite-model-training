@@ -206,6 +206,22 @@ void ocr_binarize_ink(const uint8_t *gray, size_t n, int thresh,
   }
 }
 
+/* The editor's Dark Thr floor, applied ON TOP of the polarity split, exactly
+ * as ocr_preprocess.preprocess_glyph does:
+ *     ink = ink & (gray >= min(255, dark_thr))
+ * Guarded on > 0 so the default path never touches the mask (bit-identical to
+ * the pre-slider pipeline, and to every model trained before the slider
+ * existed).  `dark_thr` is the already-nudged bound (bg_dark + 1), see
+ * model_settings.h's kDarkThr. */
+static void apply_dark_floor(const uint8_t *gray, size_t n, int dark_thr,
+                             uint8_t *ink) {
+  if (dark_thr <= 0) return;
+  const int floor = dark_thr > 255 ? 255 : dark_thr;
+  for (size_t i = 0; i < n; i++) {
+    if (ink[i] && (int)gray[i] < floor) ink[i] = 0;
+  }
+}
+
 /* ════════════════════════════════════════════════════════════════════════
  * 4. Segmentation — projection_runs + _column_span_bbox + segment_glyph_box
  *
@@ -422,15 +438,23 @@ static void info_reset(OcrGlyphInfo *info) {
   info->box.x1 = info->box.y1 = info->box.x2 = info->box.y2 = 0;
 }
 
+/* Zero the caller's canvas.  `out_size <= 0` or a null pointer is a caller
+ * error, not a buffer we may write to, so both are silently skipped. */
+static void glyph_zero(uint8_t *glyph_out, int out_size) {
+  if (glyph_out && out_size > 0) {
+    memset(glyph_out, 0, (size_t)out_size * (size_t)out_size);
+  }
+}
+
 static bool preprocess_common(const uint8_t *gray, int w, int h, int out_size,
                               OcrPolarity polarity, bool apply_segmentation,
-                              int min_run, int thresh, OcrConvention convention,
-                              OcrScratch *s, uint8_t *glyph_out,
-                              OcrGlyphInfo *info) {
+                              int min_run, int thresh, int dark_thr,
+                              OcrConvention convention, OcrScratch *s,
+                              uint8_t *glyph_out, OcrGlyphInfo *info) {
+  glyph_zero(glyph_out, out_size);
+  info_reset(info);
   const size_t out_px = (size_t)(out_size > 0 ? out_size : 0) *
                         (size_t)(out_size > 0 ? out_size : 0);
-  if (glyph_out && out_px) memset(glyph_out, 0, out_px);
-  info_reset(info);
   if (!gray || !s || !s->gray || !s->ink || !s->proj || !s->canvas ||
       !glyph_out || out_size <= 0 || !frame_in_bounds(w, h)) {
     return false;
@@ -451,6 +475,7 @@ static bool preprocess_common(const uint8_t *gray, int w, int h, int out_size,
   }
 
   ocr_binarize_ink(gray, n, t, polarity, s->ink);
+  apply_dark_floor(gray, n, dark_thr, s->ink);
   bool any = false;
   for (size_t i = 0; i < n; i++) {
     if (s->ink[i]) { any = true; break; }
@@ -504,12 +529,19 @@ static bool preprocess_common(const uint8_t *gray, int w, int h, int out_size,
   return true;
 }
 
-bool ocr_preprocess_gray(const uint8_t *gray_in, int w, int h, int out_size,
-                         OcrPolarity polarity, bool apply_segmentation,
-                         int min_run, int thresh, OcrConvention convention,
-                         OcrScratch *scratch, uint8_t *glyph_out,
-                         OcrGlyphInfo *info) {
+bool ocr_preprocess_gray_window(const uint8_t *gray_in, int w, int h,
+                                int out_size, OcrPolarity polarity,
+                                bool apply_segmentation, int min_run,
+                                int thresh, int dark_thr,
+                                OcrConvention convention, OcrScratch *scratch,
+                                uint8_t *glyph_out, OcrGlyphInfo *info) {
   if (!scratch || !scratch->gray || !frame_in_bounds(w, h)) {
+    /* The early guard runs BEFORE preprocess_common's zero-fill, so a caller
+     * that (correctly, per the header contract) ignores this bool would
+     * otherwise quantise whatever the buffer held last — a stale or boot-zero
+     * glyph that looks exactly like a real frame.  Honour the contract here
+     * too: "never raises and always leaves glyph_out fully written". */
+    glyph_zero(glyph_out, out_size);
     info_reset(info);
     return false;
   }
@@ -517,8 +549,35 @@ bool ocr_preprocess_gray(const uint8_t *gray_in, int w, int h, int out_size,
     memcpy(scratch->gray, gray_in, (size_t)w * (size_t)h);
   }
   return preprocess_common(scratch->gray, w, h, out_size, polarity,
-                           apply_segmentation, min_run, thresh, convention,
-                           scratch, glyph_out, info);
+                           apply_segmentation, min_run, thresh, dark_thr,
+                           convention, scratch, glyph_out, info);
+}
+
+bool ocr_preprocess_gray(const uint8_t *gray_in, int w, int h, int out_size,
+                         OcrPolarity polarity, bool apply_segmentation,
+                         int min_run, int thresh, OcrConvention convention,
+                         OcrScratch *scratch, uint8_t *glyph_out,
+                         OcrGlyphInfo *info) {
+  return ocr_preprocess_gray_window(gray_in, w, h, out_size, polarity,
+                                    apply_segmentation, min_run, thresh,
+                                    /* dark_thr = */ 0, convention, scratch,
+                                    glyph_out, info);
+}
+
+bool ocr_preprocess_rgb_window(const uint8_t *rgb, int w, int h, int out_size,
+                               OcrPolarity polarity, bool apply_segmentation,
+                               int min_run, int thresh, int dark_thr,
+                               OcrConvention convention, OcrScratch *scratch,
+                               uint8_t *glyph_out, OcrGlyphInfo *info) {
+  if (!scratch || !scratch->gray || !rgb || !frame_in_bounds(w, h)) {
+    glyph_zero(glyph_out, out_size);   /* see ocr_preprocess_gray_window */
+    info_reset(info);
+    return false;
+  }
+  ocr_rgb_to_lum_u8(rgb, (size_t)w * (size_t)h, scratch->gray);
+  return preprocess_common(scratch->gray, w, h, out_size, polarity,
+                           apply_segmentation, min_run, thresh, dark_thr,
+                           convention, scratch, glyph_out, info);
 }
 
 bool ocr_preprocess_rgb(const uint8_t *rgb, int w, int h, int out_size,
@@ -526,14 +585,10 @@ bool ocr_preprocess_rgb(const uint8_t *rgb, int w, int h, int out_size,
                         int min_run, int thresh, OcrConvention convention,
                         OcrScratch *scratch, uint8_t *glyph_out,
                         OcrGlyphInfo *info) {
-  if (!scratch || !scratch->gray || !rgb || !frame_in_bounds(w, h)) {
-    info_reset(info);
-    return false;
-  }
-  ocr_rgb_to_lum_u8(rgb, (size_t)w * (size_t)h, scratch->gray);
-  return preprocess_common(scratch->gray, w, h, out_size, polarity,
-                           apply_segmentation, min_run, thresh, convention,
-                           scratch, glyph_out, info);
+  return ocr_preprocess_rgb_window(rgb, w, h, out_size, polarity,
+                                   apply_segmentation, min_run, thresh,
+                                   /* dark_thr = */ 0, convention, scratch,
+                                   glyph_out, info);
 }
 
 void ocr_glyph_to_int8(const uint8_t *glyph, size_t n, int8_t *out) {

@@ -15,7 +15,14 @@
 
 #define MAX_NAME 128
 
-static int read_file(const char *path, uint8_t *dst, size_t n) {
+/* Reads exactly n bytes into dst, which holds cap.  Refuses — without writing
+ * a single byte to dst — when the manifest asks for more than cap: a corpus
+ * case outside ocr_glyph.h's envelope is a broken corpus, and this harness
+ * exists to report that, not to run off the end of its own buffer reporting
+ * it.  (It used to fread first and check the count afterwards, which is the
+ * one order that cannot work: the overrun happens on the way to the check.) */
+static int read_file(const char *path, uint8_t *dst, size_t cap, size_t n) {
+  if (n > cap) return 0;
   FILE *f = fopen(path, "rb");
   if (!f) return 0;
   const size_t got = fread(dst, 1, n, f);
@@ -65,8 +72,22 @@ int main(int argc, char **argv) {
     const size_t px = (size_t)w * (size_t)h;
     const size_t want = px * (kind == 1 ? 3u : 1u);
     snprintf(path, sizeof(path), "%s/%s.raw", argv[1], name);
-    if (!read_file(path, frame, want)) {
-      fprintf(stderr, "cannot read %s (%zu bytes)\n", path, want);
+    if (!read_file(path, frame, sizeof(frame), want)) {
+      if (want > sizeof(frame)) {
+        /* Say which case and both numbers: "cannot read" for an oversized
+         * frame reads like a missing file and sends you looking in the wrong
+         * place.  Reaching this means the manifest was not written by the
+         * current gen_corpus.py. */
+        fprintf(stderr,
+                "case %s wants %zu bytes but this harness' frame buffer is "
+                "only %zu (OCR_MAX_PIXELS * 3).\n"
+                "The manifest describes a frame outside ocr_glyph.h's "
+                "envelope; regenerate the corpus "
+                "(python3 tools/gen_corpus.py --app-data <workspace>).\n",
+                name, want, sizeof(frame));
+      } else {
+        fprintf(stderr, "cannot read %s (%zu bytes)\n", path, want);
+      }
       return 1;
     }
 

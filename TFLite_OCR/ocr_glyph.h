@@ -166,6 +166,29 @@ bool ocr_preprocess_rgb(const uint8_t *rgb, int w, int h, int out_size,
                         OcrScratch *scratch, uint8_t *glyph_out,
                         OcrGlyphInfo *info);
 
+/* The luminance-window variants, mirroring ocr_preprocess.preprocess_glyph's
+ * `dark_thr` argument.  `dark_thr` is applied ON TOP of the polarity split —
+ * ink = ink & (gray >= min(255, dark_thr)) — and 0 is a bit-exact no-op, so
+ * the pre-window entry points above are these with dark_thr = 0.
+ *
+ * The host derives the two arguments from the Dark/Lum sliders as
+ * `thresh = max(1, min(254, lum - 1))` and `dark_thr = max(0, min(255,
+ * dark + 1))` (one LSB inward, because the sliders are strict bounds and
+ * binarize_ink's comparison is not), and only when the sliders are away from
+ * 0/100 — the exported kDarkThr/kLumThr carry the already-nudged values. */
+bool ocr_preprocess_gray_window(const uint8_t *gray_in, int w, int h,
+                                int out_size, OcrPolarity polarity,
+                                bool apply_segmentation, int min_run,
+                                int thresh, int dark_thr,
+                                OcrConvention convention, OcrScratch *scratch,
+                                uint8_t *glyph_out, OcrGlyphInfo *info);
+
+bool ocr_preprocess_rgb_window(const uint8_t *rgb, int w, int h, int out_size,
+                               OcrPolarity polarity, bool apply_segmentation,
+                               int min_run, int thresh, int dark_thr,
+                               OcrConvention convention, OcrScratch *scratch,
+                               uint8_t *glyph_out, OcrGlyphInfo *info);
+
 /* Model input: out[i] = (int8_t)(glyph[i] - 128).
  * 128 is the training pipeline's zero point (the representative dataset is
  * glyph/255.0 float, and full-int8 PTQ turns that into scale 1/255,
