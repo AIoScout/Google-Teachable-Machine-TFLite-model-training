@@ -163,7 +163,7 @@ cd AItraining && pip install -r requirements.txt && python desktop_launcher.py
 
 # S3 receiver
 # Arduino IDE: open S3_UART_Receiver/S3_UART_Receiver.ino, board=ESP32S3 Dev Module
-# Debug serial: 115200 baud (USB CDC)
+# Debug serial: 921600 baud (USB CDC), same as the P4 sketches
 ```
 
 ## Critical Constraints
