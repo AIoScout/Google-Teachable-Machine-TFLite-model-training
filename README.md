@@ -18,7 +18,7 @@ belongs to.
 |---|---|---|---|---|
 | **Image** (`image`) | Image Project | 96×96 int8 grayscale by default | one class label + confidence, with a 3-layer OOD gate (`sign_pct` range, max prob, entropy) | `TFLite/` |
 | **OCR / Character** (`ocr`) | 🔠 OCR / Character Project | 28×28 int8 glyph | one character `0–9, A–Z`, plus `_background` rejector | `TFLite_OCR/` |
-| **Road Sign / Car Sign (3-Char)** (`sign_ocr`) | 🛑 Road Sign (3-Char) | 3 slots × 28×28 int8 glyphs | binary verdict, `🟢 YES — MATCH` / `🔴 NO — NOT MATCH`, from an ordered target sequence | `TFLite_Sign/` |
+| **Car License (3-Char)** (`sign_ocr`) | 🚗 Car License Project | 3 slots × 28×28 int8 glyphs | binary verdict, `🟢 YES — MATCH` / `🔴 NO — NOT MATCH`, from an ordered target sequence | `TFLite_Sign/` |
 
 ### Image Project (`image`)
 
@@ -42,8 +42,12 @@ belongs to.
 - EMNIST mixing and optional two-stage transfer learning (see §3).
 - Export route: `TFLite_OCR/TFLite_OCR.ino` (compile-time `TM_OCR_GLYPH_MODEL 1`).
 
-### Road Sign / Car Sign Project (`sign_ocr`)
+### Car License Project (`sign_ocr`)
 
+- The target sequence is the ONLY class authority: `A ▸ 1 ▸ 2` means exactly
+  the classes `A`, `1`, `2` (duplicates trained once). Stale `Class 1`/
+  `Class 2` folders are pruned from the dataset, processed cache and mixed
+  set on open/sync/train, so they can never become model labels.
 - Declare an ordered 3-character target in `#signSeqBar` (e.g. `A ▸ 1 ▸ 2`).
 - **Reading Direction**: `Left to Right (L ➔ R)` or `Right to Left (R ➔ L)`.
   RTL reverses the three split boxes after the split; pixels are never
@@ -85,6 +89,12 @@ belongs to.
 - Inference splits the sign into three boxes, runs the same 28×28 glyph
   classifier three times, and requires **all three** slots to match the
   target and clear the confidence floor before returning `YES`.
+- **Settings → Advanced → Use `_background` noise class to replace OOD
+  rejection** defaults **OFF** for Car License: the model trains on the
+  target characters only and Preview/device reject blank or unknown slots
+  with OOD Layers 1-3 plus the match floor.  ON trains the extra
+  `_background` class and exports `kSignBackgroundIsTheOnlyRejector = 1`;
+  OFF exports `0`.
 - Export route: `TFLite_Sign/TFLite_Sign.ino` (compile-time
   `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`).
 
