@@ -156,9 +156,11 @@ int main(int argc, char **argv) {
       snprintf(path, sizeof(path), "%s/%s.cmeta", argv[1], name);
       FILE *f = fopen(path, "w");
       if (!f) { perror(path); return 1; }
-      fprintf(f, "thresh=%d nb=%d ns=%d has_box=%d ok=%d empty=%d box=",
+      fprintf(f, "thresh=%d nb=%d ns=%d has_box=%d ok=%d empty=%d has_roi=%d "
+                 "pct=%.6f box=",
               info.thresh, info.num_boxes, info.num_slots, info.has_box ? 1 : 0,
-              info.ok ? 1 : 0, info.empty ? 1 : 0);
+              info.ok ? 1 : 0, info.empty ? 1 : 0, info.has_roi ? 1 : 0,
+              (double)info.sign_pct);
       if (info.has_box) {
         fprintf(f, "%d,%d,%d,%d\n", info.box.x1, info.box.y1, info.box.x2,
                 info.box.y2);
@@ -224,9 +226,18 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof(path), "%s/%s.cmeta", argv[1], name);
     FILE *f = fopen(path, "w");
     if (!f) { perror(path); return 1; }
-    fprintf(f, "thresh=%d nb=%d ns=%d has_box=%d ok=%d empty=%d box=",
+    fprintf(f, "thresh=%d nb=%d ns=%d has_box=%d ok=%d empty=%d has_roi=%d "
+               "pct=%.6f roi=",
             info.thresh, info.num_boxes, info.num_slots, info.has_box ? 1 : 0,
-            info.ok ? 1 : 0, info.empty ? 1 : 0);
+            info.ok ? 1 : 0, info.empty ? 1 : 0, info.has_roi ? 1 : 0,
+            (double)info.sign_pct);
+    if (info.roi_box.x2 > info.roi_box.x1 &&
+        info.roi_box.y2 > info.roi_box.y1) {
+      fprintf(f, "%d,%d,%d,%d box=", info.roi_box.x1, info.roi_box.y1,
+              info.roi_box.x2, info.roi_box.y2);
+    } else {
+      fprintf(f, "- box=");
+    }
     if (info.has_box) {
       fprintf(f, "%d,%d,%d,%d\n", info.box.x1, info.box.y1, info.box.x2,
               info.box.y2);

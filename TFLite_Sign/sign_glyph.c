@@ -673,7 +673,10 @@ static void info_reset(SignGlyphInfo *info) {
   info->has_box = false;
   info->ok = false;
   info->empty = true;
+  info->has_roi = false;
   info->box.x1 = info->box.y1 = info->box.x2 = info->box.y2 = 0;
+  info->roi_box.x1 = info->roi_box.y1 = info->roi_box.x2 = info->roi_box.y2 = 0;
+  info->sign_pct = 0.0f;
 }
 
 static void glyph_zero(uint8_t *glyph_out, int out_size) {
@@ -797,6 +800,180 @@ bool sign_preprocess_glyph(const uint8_t *gray_in, int w, int h, int out_size,
  * slot path is implemented by calling the same preprocess_common rather than
  * by slicing the frame mask.
  * ════════════════════════════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════════════════════════════
+ * 7b. Interior ink ROI (ocr_preprocess._interior_ink_components +
+ *     _choose_interior_band)
+ *
+ * The Python side uses OpenCV for speed, but the components are the same
+ * 8-connected sets a raster-scan flood fill finds, and the filters/selection
+ * are integer-identical.  The result is the tight band of characters (or the
+ * single character in an Edit sample) with a uniform 10 % pad; border
+ * clutter, frame lines and specks never reach the split.
+ * ════════════════════════════════════════════════════════════════════════ */
+#define INTERIOR_MAX_COMPONENTS 256
+
+typedef struct {
+  SignBox box;
+  int area;
+} SignCand;
+
+static int iabs(int v) { return (v < 0) ? -v : v; }
+
+/* Returns true and fills roi/pct when a band was found.  Ink outside the ROI
+ * is zeroed so the projection split only sees the characters. */
+static bool interior_roi_c(uint8_t *ink, int w, int h, SignScratch *s,
+                           SignBox *roi_out, float *pct_out) {
+  if (!ink || !s || !s->visited || !s->stack || w <= 0 || h <= 0) return false;
+  const size_t frame = (size_t)w * (size_t)h;
+  memset(s->visited, 0, frame);
+
+  const int shorter = (w < h) ? w : h;
+  int margin = (shorter * 6 + 50) / 100;
+  if (margin < 2) margin = 2;
+  int min_area = (int)((frame * 4 + 5000) / 10000);
+  if (min_area < 6) min_area = 6;
+
+  SignCand cand[INTERIOR_MAX_COMPONENTS];
+  int ncand = 0;
+
+  for (int y = 0; y < h && ncand < INTERIOR_MAX_COMPONENTS; y++) {
+    for (int x = 0; x < w && ncand < INTERIOR_MAX_COMPONENTS; x++) {
+      const size_t start = (size_t)y * (size_t)w + (size_t)x;
+      if (!ink[start] || s->visited[start]) continue;
+
+      int top = 0;
+      s->visited[start] = 1;
+      s->stack[top++] = (int32_t)start;
+      int x1 = x, y1 = y, x2 = x + 1, y2 = y + 1;
+      int area = 0;
+      while (top > 0) {
+        const int32_t idx = s->stack[--top];
+        const int cy = (int)(idx / w);
+        const int cx = (int)(idx % w);
+        if (cx < x1) x1 = cx;
+        if (cx + 1 > x2) x2 = cx + 1;
+        if (cy < y1) y1 = cy;
+        if (cy + 1 > y2) y2 = cy + 1;
+        area++;
+        for (int dy = -1; dy <= 1; dy++) {
+          const int ny = cy + dy;
+          if (ny < 0 || ny >= h) continue;
+          for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            const int nx = cx + dx;
+            if (nx < 0 || nx >= w) continue;
+            const size_t nidx = (size_t)ny * (size_t)w + (size_t)nx;
+            if (!ink[nidx] || s->visited[nidx]) continue;
+            s->visited[nidx] = 1;
+            s->stack[top++] = (int32_t)nidx;
+          }
+        }
+      }
+
+      const int cw = x2 - x1;
+      const int ch = y2 - y1;
+      if (area < min_area) continue;
+      if (x1 <= margin || y1 <= margin || x2 >= w - margin ||
+          y2 >= h - margin) {
+        continue;
+      }
+      if (cw * 100 > 85 * w || ch * 100 > 60 * h) continue;
+      if (area * 100 > 40 * (int)frame) continue;
+      cand[ncand].box.x1 = x1;
+      cand[ncand].box.y1 = y1;
+      cand[ncand].box.x2 = x2;
+      cand[ncand].box.y2 = y2;
+      cand[ncand].area = area;
+      ncand++;
+    }
+  }
+
+  if (ncand < 2) {
+    /* A sign needs at least two character components.  One component means
+     * a tight capture (or touching characters); cropping to it could discard
+     * edge glyphs, so leave the frame intact and let the split reconcile. */
+    long count = 0;
+    for (size_t i = 0; i < frame; i++) count += ink[i] ? 1 : 0;
+    if (pct_out) *pct_out = (float)(100.0 * (double)count / (double)frame);
+    return false;
+  }
+
+  int best = 0;
+  int best_count = -1;
+  int best_total = -1;
+  for (int i = 0; i < ncand; i++) {
+    const int ah = (cand[i].box.y2 - cand[i].box.y1 > 0)
+                       ? cand[i].box.y2 - cand[i].box.y1 : 1;
+    const int acy2 = 2 * cand[i].box.y1 + ah;
+    const int band2 = 2 * ah;
+    int count = 0;
+    int total = 0;
+    for (int j = 0; j < ncand; j++) {
+      const int ch = cand[j].box.y2 - cand[j].box.y1;
+      const int cy2 = 2 * cand[j].box.y1 + ch;
+      if (iabs(cy2 - acy2) > band2) continue;
+      count++;
+      total += cand[j].area;
+    }
+    if (count > best_count || (count == best_count && total > best_total)) {
+      best_count = count;
+      best_total = total;
+      best = i;
+    }
+  }
+
+  const int ah = (cand[best].box.y2 - cand[best].box.y1 > 0)
+                     ? cand[best].box.y2 - cand[best].box.y1 : 1;
+  const int acy2 = 2 * cand[best].box.y1 + ah;
+  const int band2 = 2 * ah;
+  int bx1 = w, by1 = h, bx2 = 0, by2 = 0;
+  for (int j = 0; j < ncand; j++) {
+    const int ch = cand[j].box.y2 - cand[j].box.y1;
+    const int cy2 = 2 * cand[j].box.y1 + ch;
+    if (iabs(cy2 - acy2) > band2) continue;
+    if (cand[j].box.x1 < bx1) bx1 = cand[j].box.x1;
+    if (cand[j].box.y1 < by1) by1 = cand[j].box.y1;
+    if (cand[j].box.x2 > bx2) bx2 = cand[j].box.x2;
+    if (cand[j].box.y2 > by2) by2 = cand[j].box.y2;
+  }
+  if (bx2 <= bx1 || by2 <= by1) return false;
+
+  const int cw = bx2 - bx1;
+  const int ch = by2 - by1;
+  int pad = ((cw > ch ? cw : ch) * 10 + 50) / 100;
+  if (pad < 2) pad = 2;
+  int rx1 = bx1 - pad; if (rx1 < 0) rx1 = 0;
+  int ry1 = by1 - pad; if (ry1 < 0) ry1 = 0;
+  int rx2 = bx2 + pad; if (rx2 > w) rx2 = w;
+  int ry2 = by2 + pad; if (ry2 > h) ry2 = h;
+  if (rx2 <= rx1 || ry2 <= ry1) return false;
+
+  /* Only the selected character band survives to the split.  The padded
+   * ROI stays white around it, so a frame line crossing the pad cannot
+   * become a fourth projection run (Python zeroes the same tight box). */
+  for (int y = 0; y < h; y++) {
+    uint8_t *row = ink + (size_t)y * (size_t)w;
+    for (int x = 0; x < w; x++) {
+      if (x < bx1 || x >= bx2 || y < by1 || y >= by2) row[x] = 0;
+    }
+  }
+
+  long count = 0;
+  for (int y = ry1; y < ry2; y++) {
+    const uint8_t *row = ink + (size_t)y * (size_t)w;
+    for (int x = rx1; x < rx2; x++) count += row[x] ? 1 : 0;
+  }
+  const long total = (long)(rx2 - rx1) * (long)(ry2 - ry1);
+  if (pct_out) {
+    *pct_out = (total > 0) ? (float)(100.0 * (double)count / (double)total) : 0.0f;
+  }
+  if (roi_out) {
+    roi_out->x1 = rx1; roi_out->y1 = ry1;
+    roi_out->x2 = rx2; roi_out->y2 = ry2;
+  }
+  return true;
+}
+
 bool preprocess_sign_sequence_c(const uint8_t *gray_in, int w, int h,
                                 int out_size, int count, int reading_order,
                                 SignPolarity polarity, bool apply_segmentation,
@@ -846,6 +1023,32 @@ bool preprocess_sign_sequence_c(const uint8_t *gray_in, int w, int h,
   } else {
     sign_binarize_ink(gray_in, frame_px, t, polarity, scratch->ink);
     apply_dark_floor(gray_in, frame_px, dark_thr, scratch->ink);
+  }
+
+  /* Interior character-band ROI: the same border/speck/frame cleanup and
+   * tight padded box as ocr_preprocess.find_interior_ink_roi /
+   * preprocess_sign_sequence(find_roi=True).  With segmentation off the
+   * caller already handed us the tight frame, so there is nothing to find. */
+  if (apply_segmentation) {
+    SignBox roi;
+    float pct = 0.0f;
+    if (interior_roi_c(scratch->ink, w, h, scratch, &roi, &pct)) {
+      if (info) {
+        info->has_roi = true;
+        info->roi_box = roi;
+        info->sign_pct = pct;
+      }
+    } else if (info) {
+      info->roi_box.x1 = 0; info->roi_box.y1 = 0;
+      info->roi_box.x2 = w; info->roi_box.y2 = h;
+      info->sign_pct = pct;
+    }
+  } else if (info) {
+    long count = 0;
+    for (size_t i = 0; i < frame_px; i++) count += scratch->ink[i] ? 1 : 0;
+    info->sign_pct = (frame_px > 0)
+                         ? (float)(100.0 * (double)count / (double)frame_px)
+                         : 0.0f;
   }
 
   /* ── the split (physical left-to-right) ───────────────────────────────── */
@@ -955,6 +1158,8 @@ size_t sign_scratch_bytes(int w, int h, int out_size) {
   const size_t out_px = (size_t)out_size * (size_t)out_size;
   return align_up(frame, 4)                          /* gray    */
        + align_up(frame, 4)                          /* ink     */
+       + align_up(frame, 4)                          /* visited */
+       + align_up(frame * sizeof(int32_t), 4)        /* stack   */
        + align_up(out_px, 4)                         /* canvas  */
        + align_up(out_px, 4)                         /* canvas2 */
        + align_up((size_t)w * sizeof(int32_t), 4)    /* proj    */
@@ -966,6 +1171,8 @@ bool sign_scratch_init(SignScratch *scratch, void *block, size_t block_bytes,
                        int w, int h, int out_size) {
   if (!scratch) return false;
   scratch->gray = scratch->ink = scratch->canvas = scratch->canvas2 = NULL;
+  scratch->visited = NULL;
+  scratch->stack = NULL;
   scratch->proj = NULL;
   scratch->boxes = NULL;
   if (!block || w < 0 || h < 0 || out_size < 0) return false;
@@ -977,6 +1184,9 @@ bool sign_scratch_init(SignScratch *scratch, void *block, size_t block_bytes,
 
   scratch->gray = p;    p += align_up(frame, 4);
   scratch->ink = p;     p += align_up(frame, 4);
+  scratch->visited = p; p += align_up(frame, 4);
+  scratch->stack = (int32_t *)p;
+  p += align_up(frame * sizeof(int32_t), 4);
   scratch->canvas = p;  p += align_up(out_px, 4);
   scratch->canvas2 = p; p += align_up(out_px, 4);
   scratch->proj = (int32_t *)p;

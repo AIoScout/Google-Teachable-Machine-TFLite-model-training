@@ -159,10 +159,20 @@ static_assert(g_frame_side >= 1 && g_frame_side <= SIGN_MAX_W &&
 //   0 = no "_background" class was trained.  The standard OOD gates
 //       (kOodSignMinPct/MaxPct, kOodMaxProbMin, kOodEntropyRatioMax) compose
 //       with the same per-slot match rule, exactly like the host preview.
+// `kBackgroundClassIndex` is the exported index of "_background" in
+// kCategoryLabels, or -1 when the class is absent.
 // Older exports predate the field and always trained a background class, so
-// the fallback keeps their previous behaviour.
-#ifndef TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR
-static constexpr bool kSignBackgroundIsTheOnlyRejector = true;
+// the fallback keeps their previous behaviour; exports from the first
+// version of the toggle carry the legacy TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR
+// name and are honoured too.
+#ifndef TM_SIGN_USE_BACKGROUND_OOD
+  #ifdef TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR
+    static constexpr bool kSignBackgroundReplacesOod =
+        kSignBackgroundIsTheOnlyRejector;
+  #else
+    static constexpr bool kSignBackgroundReplacesOod = true;
+  #endif
+  static constexpr int kBackgroundClassIndex = -1;  // scan labels by name
 #endif
 
 #include "tensorflow/lite/schema/schema_generated.h"
@@ -1130,11 +1140,17 @@ static inline void dump_xor_final(uint8_t running_xor, const uint8_t *p, size_t 
 // Each of the three slots rejects with it independently: a blank slot must not
 // vote for a real class, or a noise column could complete a spurious MATCH.
 //
-// Detected BY NAME, not by "the last index is always background": projects may
-// add classes later, and a positional rule would silently reinterpret the
-// exported target indices.  A model without the class leaves this at -1 and
-// setup() refuses to run (see the N+1 contract there).
+// New exports carry the index explicitly (kBackgroundClassIndex); older ones
+// are detected BY NAME, not by "the last index is always background": projects
+// may add classes later, and a positional rule would silently reinterpret the
+// exported target indices.  A model without the class leaves this at -1; when
+// OOD is the rejector that is normal, when _background is it is a boot error.
 static int8_t background_class_id() {
+#ifdef TM_SIGN_USE_BACKGROUND_OOD
+  /* The exporter recorded the index in the same labels.txt it generated, so
+   * this is authoritative — no name scan can drift if a label is renamed. */
+  return (int8_t)kBackgroundClassIndex;
+#else
   static int8_t cached = -2;   // -2 = not looked up yet, -1 = no such class
   if (cached == -2) {
     cached = -1;
@@ -1147,6 +1163,7 @@ static int8_t background_class_id() {
     }
   }
   return cached;
+#endif
 }
 
 static inline bool is_background_id(uint8_t id) {
@@ -1230,12 +1247,12 @@ static bool ood_is_in_distribution(float sign_pct, TfLiteTensor *output,
   // ── sign path: which rejector is authoritative? ───────────────────────
   // sign_pct comes from sign_frame_ink_pct() (the current frame's in-window
   // ink share), not from the legacy GetImage() path, so Layer 1 is real when
-  // the OOD policy is active.  With kSignBackgroundIsTheOnlyRejector the
+  // the OOD policy is active.  With kSignBackgroundReplacesOod the
   // model's explicit "_background" class is better information than the
   // dark-pixel prior, so all three gates are opened and the per-slot match
   // rule (ink + not background + class + prob >= kSignMatchMinProb) mirrors
   // the host preview exactly.  The values below are still computed for logs.
-  if (kSignBackgroundIsTheOnlyRejector) {
+  if (kSignBackgroundReplacesOod) {
     min_pct = 0.0f;
     max_pct = 100.0f;
     max_prob_min = 0.0f;
@@ -1339,12 +1356,9 @@ static SignSlotInfo s_slot_info[SIGN_SEQUENCE_LEN];
 static SignGlyphInfo s_sign_info;
 static uint32_t   s_sign_frames = 0;
 static uint32_t   s_sign_empty = 0;   // frames where the split found no ink at all
-// OOD Layer 1's input, measured on the SAME frame the slots came from: the
-// share of the glyph union box inside the Dark..Lum window.  The host uses
-// the cleaned ROI ink share; both are "how much of the sign area is ink",
-// and the exported spmin/spmax band is wide enough for the small geometry
-// difference.  Only consumed when kSignBackgroundIsTheOnlyRejector == 0.
-static float      s_sign_pct = 0.0f;
+// OOD Layer 1's input comes from sign_glyph.c's interior-ROI pass
+// (s_sign_info.sign_pct): the share of the tight character-band ROI that is
+// ink, after the same border/speck/frame cleanup the host sequence uses.
 
 // One allocation at boot.  sign_scratch_bytes() is a pure function of the
 // geometry and a failure here is a build/config fact, not a transient
@@ -1373,36 +1387,6 @@ static bool sign_scratch_alloc() {
                 (unsigned)need, where, g_frame_side, g_frame_side,
                 SIGN_SEQUENCE_LEN, SIGN_GLYPH_SIZE);
   return true;
-}
-
-// Ink share of the split's union box, in percent.  Mirrors the host's
-// sign_pct = ink_mask.mean() * 100 (there over the cleaned ROI): count the
-// frame pixels inside the same Dark..Lum window the split used, over the
-// box that contains the three glyphs.  Returns 0 when there is no box.
-static float sign_frame_ink_pct(const uint8_t *gray) {
-  if (gray == nullptr || !s_sign_info.has_box) return 0.0f;
-  int x1 = s_sign_info.box.x1, y1 = s_sign_info.box.y1;
-  int x2 = s_sign_info.box.x2, y2 = s_sign_info.box.y2;
-  if (x1 < 0) x1 = 0;
-  if (y1 < 0) y1 = 0;
-  if (x2 > g_frame_side) x2 = g_frame_side;
-  if (y2 > g_frame_side) y2 = g_frame_side;
-  if (x2 <= x1 || y2 <= y1) return 0.0f;
-  const int t = s_sign_info.thresh;
-  if (t <= 0) return 0.0f;
-  const int floor = kSignDarkThr;
-  long count = 0;
-  long total = 0;
-  for (int y = y1; y < y2; y++) {
-    const uint8_t *row = gray + (size_t)y * (size_t)g_frame_side;
-    for (int x = x1; x < x2; x++) {
-      const int v = (int)row[x];
-      if (v <= t && v >= floor) count++;
-      total++;
-    }
-  }
-  if (total <= 0) return 0.0f;
-  return (float)(100.0 * (double)count / (double)total);
 }
 
 // Capture one fresh frame and run the integer-exact sign front-end.  Returns
@@ -1450,7 +1434,6 @@ static bool sign_feed_slots() {
   }
   s_sign_frames++;
   if (s_sign_info.empty) s_sign_empty++;
-  s_sign_pct = sign_frame_ink_pct(gray);
   return true;
 }
 
@@ -1793,13 +1776,15 @@ static void inference_task(void *arg) {
       slot_prob[slot] = prob;
       if ((int)slot_conf[slot] < slot_best_min) slot_best_min = (int)slot_conf[slot];
 
-      // OOD / "_background" rejection, per slot.  s_sign_pct is measured on
-      // the same frame; with kSignBackgroundIsTheOnlyRejector the helper
-      // opens all three gates and the model's background class decides,
-      // otherwise Layers 1-3 compose with the match rule.
+      // OOD / "_background" rejection, per slot.  s_sign_info.sign_pct is
+      // the ink share of the interior ROI measured by sign_glyph.c on this
+      // frame; with kSignBackgroundReplacesOod the helper opens all
+      // three gates and the model's background class decides, otherwise
+      // Layers 1-3 compose with the match rule.
       float max_prob = 0.0f, entropy_ratio = 1.0f;
       const bool in_distribution =
-          ood_is_in_distribution(s_sign_pct, output, &max_prob, &entropy_ratio);
+          ood_is_in_distribution(s_sign_info.sign_pct, output, &max_prob,
+                                 &entropy_ratio);
       const bool is_background = is_background_id(slot_label[slot]);
       const int target = kTargetSignClassIndices[slot];
 
@@ -2037,7 +2022,7 @@ void setup() {
                   "different source resolution than the model was trained on.\r\n",
                   g_frame_side);
   }
-  if (kSignBackgroundIsTheOnlyRejector) {
+  if (kSignBackgroundReplacesOod) {
     Serial.println("OOD: bypassed — each slot rejects with the model's \"_background\" class "
                    "(match rule mirrors the host preview).");
   } else {
@@ -2267,23 +2252,46 @@ void setup() {
                 (unsigned)s_input_bytes, (unsigned)sizeof(s_input_snapshot));
 
   // ── Rejection policy ──────────────────────────────────────────────────
-  // With kSignBackgroundIsTheOnlyRejector the model MUST carry the N+1
+  // With kSignBackgroundReplacesOod the model MUST carry the N+1
   // "_background" class: blank slots would otherwise be forced to vote for
   // a real character and a stray line could complete a spurious MATCH.  With
   // the exported policy OFF the model trains on the target characters only,
   // and the OOD gates + the per-slot probability floor are the rejectors.
-  if (kSignBackgroundIsTheOnlyRejector && background_class_id() < 0) {
+#ifdef TM_SIGN_USE_BACKGROUND_OOD
+  if (kBackgroundClassIndex < -1 || kBackgroundClassIndex >= kCategoryCount) {
+    Serial.printf("FATAL: kBackgroundClassIndex=%d is outside [-1, %d) — "
+                  "re-export the sign project.\r\n",
+                  (int)kBackgroundClassIndex, (int)kCategoryCount);
+    Serial.flush();
+    for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+  }
+  if (kBackgroundClassIndex >= 0) {
+    const char *bg_name = kCategoryLabels[kBackgroundClassIndex];
+    if (bg_name == nullptr || strcmp(bg_name, "_background") != 0) {
+      Serial.printf("FATAL: kBackgroundClassIndex=%d points at \"%s\", not "
+                    "\"_background\" — re-export the sign project.\r\n",
+                    (int)kBackgroundClassIndex, bg_name ? bg_name : "(null)");
+      Serial.flush();
+      for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+    }
+  }
+#endif
+  if (kSignBackgroundReplacesOod && background_class_id() < 0) {
     Serial.println("FATAL: the export says _background is the only rejector, but the "
                    "model has no \"_background\" class — re-export the sign project.");
     Serial.flush();
     for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
   }
-  if (kSignBackgroundIsTheOnlyRejector) {
-    Serial.printf("Sign labels: %d classes, \"_background\" = id %d (per-slot rejection)\r\n",
-                  (int)kCategoryCount, (int)background_class_id());
+  if (kSignBackgroundReplacesOod) {
+    Serial.printf("Sign labels: %d classes, rejection=_background (id %d) + %.2f floor\r\n",
+                  (int)kCategoryCount, (int)background_class_id(),
+                  (double)kSignMatchMinProb);
   } else {
-    Serial.printf("Sign labels: %d classes, no _background class (OOD gates + %.2f floor)\r\n",
-                  (int)kCategoryCount, (double)kSignMatchMinProb);
+    Serial.printf("Sign labels: %d classes, rejection=OOD gates (sp=%.1f..%.1f "
+                  "mp>=%.2f er<=%.2f) + %.2f floor\r\n",
+                  (int)kCategoryCount, (double)kOodSignMinPct,
+                  (double)kOodSignMaxPct, (double)kOodMaxProbMin,
+                  (double)kOodEntropyRatioMax, (double)kSignMatchMinProb);
   }
 
   // ── The exported target must address real, non-background classes ────

@@ -89,12 +89,19 @@ belongs to.
 - Inference splits the sign into three boxes, runs the same 28×28 glyph
   classifier three times, and requires **all three** slots to match the
   target and clear the confidence floor before returning `YES`.
+- The MCU mirrors the host search in `sign_glyph.c`: binarise the frame,
+  drop the 6 % border margin / huge frame components / specks, select the
+  character band, pad it symmetrically to a `roi_box` (and compute
+  `sign_pct`), then split.  The same integer narrow-stroke widening is
+  applied per slot.  `sign_glyph_host.c` + `tests/test_sign_glyph_parity.py`
+  pin Python↔C bit-for-bit.
 - **Settings → Advanced → Use `_background` noise class to replace OOD
   rejection** defaults **OFF** for Car License: the model trains on the
   target characters only and Preview/device reject blank or unknown slots
   with OOD Layers 1-3 plus the match floor.  ON trains the extra
-  `_background` class and exports `kSignBackgroundIsTheOnlyRejector = 1`;
-  OFF exports `0`.
+  `_background` class.  The export carries `TM_SIGN_USE_BACKGROUND_OOD`,
+  `kSignBackgroundReplacesOod` and `kBackgroundClassIndex` (-1 when absent);
+  the legacy `kSignBackgroundIsTheOnlyRejector` spelling is emitted too.
 - Export route: `TFLite_Sign/TFLite_Sign.ino` (compile-time
   `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`).
 
@@ -125,9 +132,13 @@ enforces it.
 - Samples are stored at the full captured resolution; the model input is
   cropped and resized at train/eval time.  Use **Edit** on a class card to
   open the Sample Worktable.
-- **Auto (find sign)** uses the exposure-adaptive shadow-search box; **Manual
-  ROI** pins a fixed crop (`ROI X1/Y1/X2/Y2`, 0–1 normalized).  Both are
-  available per class, and the device mirrors the same geometry.
+- **Auto (find sign)** uses the exposure-adaptive shadow-search box; in the
+  glyph/Car-License Edit worktable it instead finds the tight interior
+  character band from the current Dark/Lum window (6 % border margin,
+  frame/speck cleanup, 10 % symmetric pad) and redraws box + Processed crop
+  live.  **Manual ROI** pins a fixed crop (`ROI X1/Y1/X2/Y2`, 0–1
+  normalized).  Both are available per class, and the device mirrors the same
+  geometry.
 - **Dark Thr** (0–100) and **Lum Thr** (50–255) drive the G-channel mask and
   the Preview/openness statistics.  Defaults 0/100 are a bit-exact Otsu
   no-op on the device.

@@ -102,7 +102,10 @@ typedef struct {
   bool has_box;     /* box is valid                                       */
   bool ok;          /* at least one slot found ink                        */
   bool empty;       /* !ok                                                */
-  SignBox box;
+  bool has_roi;     /* interior ROI search found a character band         */
+  SignBox box;      /* union of the final slot boxes                      */
+  SignBox roi_box;  /* padded interior band (the OOD ROI)                 */
+  float sign_pct;   /* ink share of roi_box, percent (OOD Layer 1)        */
 } SignGlyphInfo;
 
 /* One slot, in LABEL order (after any RTL reversal).  `box`, `ok` and `empty`
@@ -124,6 +127,8 @@ typedef struct {
 typedef struct {
   uint8_t *gray;    /* w*h             */
   uint8_t *ink;     /* w*h             */
+  uint8_t *visited; /* w*h             */  /* interior-ROI component scan */
+  int32_t *stack;   /* w*h             */  /* interior-ROI flood stack   */
   int32_t *proj;    /* w               */
   uint8_t *canvas;  /* out*out         */
   uint8_t *canvas2; /* out*out         */
