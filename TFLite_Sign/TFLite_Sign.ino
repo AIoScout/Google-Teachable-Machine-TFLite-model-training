@@ -216,6 +216,7 @@ static_assert(g_frame_side >= 1 && g_frame_side <= SIGN_MAX_W &&
 #include <FFat.h>
 #include <driver/gpio.h>
 #include <math.h>
+#include <new>
 #include <errno.h>
 #include <dirent.h>
 #include <stdio.h>
@@ -490,12 +491,25 @@ static bool s_sd_full = false;
 // signed value.
 
 // An area of memory to use for input, output, and intermediate arrays.
-// 8 MB: the default AItraining architecture (conv 32/64/128, dense 128)
-// exports ~5 MB models on multi-class datasets — a smaller arena fails
-// AllocateTensors on the device.  SRAM-first allocation below falls back
-// to PSRAM automatically.
-constexpr int kTensorArenaSize = 8192 * 1024;
-static uint8_t *tensor_arena=nullptr ;
+// The compact glyph head (conv 32/64/128 -> GAP -> Dense 128) fits in a
+// 320 KB arena, which fits the P4's internal SRAM.  SRAM is tried first;
+// if AllocateTensors() still asks for more, setup() retries once in PSRAM
+// with the legacy 8 MB ceiling so an older bloated export still boots (it
+// just runs from PSRAM).  A failed allocation now prints the exact reason
+// instead of returning silently from setup().
+constexpr size_t kTensorArenaSize = 320 * 1024;
+constexpr size_t kTensorArenaFallbackSize = 8 * 1024 * 1024;
+static uint8_t *tensor_arena = nullptr;
+static size_t s_arena_bytes = 0;
+
+#define SIGN_FATAL(...)                                                        \
+  do {                                                                         \
+    Serial.print("FATAL: ");                                                   \
+    Serial.printf(__VA_ARGS__);                                                \
+    Serial.print("\r\n");                                                     \
+    Serial.flush();                                                            \
+    for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }                              \
+  } while (0)
 
 }  // namespace
 
@@ -2022,6 +2036,67 @@ static void inference_task(void *arg) {
 
 
 // The name of this function is important for Arduino compatibility.
+// Names for the operator codes printed before AllocateTensors().  A missing
+// resolver kernel is otherwise reported as "AllocateTensors() failed" on
+// UART0, which TinyUSB/CDC users never see.
+static const char *builtin_op_name(tflite::BuiltinOperator code) {
+  switch (code) {
+    case tflite::BuiltinOperator_ADD: return "ADD";
+    case tflite::BuiltinOperator_AVERAGE_POOL_2D: return "AVERAGE_POOL_2D";
+    case tflite::BuiltinOperator_CONCATENATION: return "CONCATENATION";
+    case tflite::BuiltinOperator_CONV_2D: return "CONV_2D";
+    case tflite::BuiltinOperator_DEPTHWISE_CONV_2D: return "DEPTHWISE_CONV_2D";
+    case tflite::BuiltinOperator_DEQUANTIZE: return "DEQUANTIZE";
+    case tflite::BuiltinOperator_FULLY_CONNECTED: return "FULLY_CONNECTED";
+    case tflite::BuiltinOperator_LEAKY_RELU: return "LEAKY_RELU";
+    case tflite::BuiltinOperator_LOGISTIC: return "LOGISTIC";
+    case tflite::BuiltinOperator_MAXIMUM: return "MAXIMUM";
+    case tflite::BuiltinOperator_MAX_POOL_2D: return "MAX_POOL_2D";
+    case tflite::BuiltinOperator_MEAN: return "MEAN";
+    case tflite::BuiltinOperator_MINIMUM: return "MINIMUM";
+    case tflite::BuiltinOperator_MUL: return "MUL";
+    case tflite::BuiltinOperator_PACK: return "PACK";
+    case tflite::BuiltinOperator_PAD: return "PAD";
+    case tflite::BuiltinOperator_QUANTIZE: return "QUANTIZE";
+    case tflite::BuiltinOperator_REDUCE_MAX: return "REDUCE_MAX";
+    case tflite::BuiltinOperator_RELU: return "RELU";
+    case tflite::BuiltinOperator_RELU6: return "RELU6";
+    case tflite::BuiltinOperator_RESHAPE: return "RESHAPE";
+    case tflite::BuiltinOperator_RESIZE_BILINEAR: return "RESIZE_BILINEAR";
+    case tflite::BuiltinOperator_RSQRT: return "RSQRT";
+    case tflite::BuiltinOperator_SHAPE: return "SHAPE";
+    case tflite::BuiltinOperator_SOFTMAX: return "SOFTMAX";
+    case tflite::BuiltinOperator_STRIDED_SLICE: return "STRIDED_SLICE";
+    case tflite::BuiltinOperator_SUB: return "SUB";
+    case tflite::BuiltinOperator_TANH: return "TANH";
+    case tflite::BuiltinOperator_TRANSPOSE: return "TRANSPOSE";
+    case tflite::BuiltinOperator_CUSTOM: return "CUSTOM";
+    default: return "UNKNOWN";
+  }
+}
+
+static void print_model_ops(const tflite::Model *m) {
+  if (m == nullptr || m->operator_codes() == nullptr) {
+    Serial.println("Model operator codes: (none)");
+    return;
+  }
+  const auto *codes = m->operator_codes();
+  Serial.printf("Model operator codes (%u):", (unsigned)codes->size());
+  for (unsigned i = 0; i < codes->size(); i++) {
+    const auto *oc = codes->Get(i);
+    if (oc == nullptr) continue;
+    if (oc->builtin_code() == tflite::BuiltinOperator_CUSTOM) {
+      const auto *custom = oc->custom_code();
+      Serial.printf(" %s", custom ? custom->c_str() : "CUSTOM(?)");
+    } else {
+      Serial.printf(" %s(%d)", builtin_op_name(oc->builtin_code()),
+                    (int)oc->builtin_code());
+    }
+  }
+  Serial.println();
+  Serial.flush();
+}
+
 void setup() {
   // Set up logging. Google style is to avoid globals or statics because of
   // lifetime uncertainty, but since this has a trivial destructor it's okay.
@@ -2128,12 +2203,10 @@ void setup() {
   // Map the model into a usable data structure. This doesn't involve any
   // copying or parsing, it's a very lightweight operation.
   model = tflite::GetModel(g_tm_model_data);
+  print_model_ops(model);
   if (model->version() != TFLITE_SCHEMA_VERSION) {
-    TF_LITE_REPORT_ERROR(error_reporter,
-                         "Model provided is schema version %d not equal "
-                         "to supported version %d.",
-                         model->version(), TFLITE_SCHEMA_VERSION);
-    return;
+    SIGN_FATAL("model schema version %d != supported %d — re-export the model",
+               (int)model->version(), (int)TFLITE_SCHEMA_VERSION);
   }
 
   #if TM_HAS_GENERATED_MODEL_RESOLVER
@@ -2141,31 +2214,51 @@ void setup() {
   static bool resolver_registered = false;
   if (!resolver_registered) {
     if (RegisterModelOps(micro_op_resolver) != kTfLiteOk) {
-      TF_LITE_REPORT_ERROR(error_reporter, "RegisterModelOps() failed");
-      return;
+      SIGN_FATAL("RegisterModelOps() failed — the generated model_resolver.h "
+                 "is missing an op listed above; re-export the model");
     }
     resolver_registered = true;
   }
   #else
-  static tflite::MicroMutableOpResolver<12> micro_op_resolver;
+  static tflite::MicroMutableOpResolver<32> micro_op_resolver;
   static bool resolver_registered = false;
   if (!resolver_registered) {
-    if (micro_op_resolver.AddAveragePool2D() != kTfLiteOk) return;
-    if (micro_op_resolver.AddMaxPool2D() != kTfLiteOk) return;
-    if (micro_op_resolver.AddConv2D() != kTfLiteOk) return;
-    if (micro_op_resolver.AddDepthwiseConv2D() != kTfLiteOk) return;
-    if (micro_op_resolver.AddShape() != kTfLiteOk) return;
-    if (micro_op_resolver.AddStridedSlice() != kTfLiteOk) return;
-    if (micro_op_resolver.AddPack() != kTfLiteOk) return;
-    if (micro_op_resolver.AddReshape() != kTfLiteOk) return;
-    if (micro_op_resolver.AddSoftmax() != kTfLiteOk) return;
-    if (micro_op_resolver.AddFullyConnected() != kTfLiteOk) return;
-    // RSQRT + REDUCE_MAX: the L2-normalisation tail (x / sqrt(sum(x^2))) that
-    // the current exports end with.  Both were missing here AND from the
-    // generated model_resolver.h; the symptom is a model that flashes fine
-    // and then dies at AllocateTensors() with no mention of the op.
-    if (micro_op_resolver.AddRsqrt() != kTfLiteOk) return;
-    if (micro_op_resolver.AddReduceMax() != kTfLiteOk) return;
+    // Superset of the kernels used by the image, OCR and sign exports.  Every
+    // failure is a named FATAL: a missing kernel otherwise surfaces only as
+    // "AllocateTensors() failed" on UART0.
+    #define ADD_MICRO_OP(fn)                                                   \
+      do {                                                                     \
+        if (micro_op_resolver.fn() != kTfLiteOk) {                             \
+          SIGN_FATAL("resolver.%s() failed — this TFLM build lacks the kernel", \
+                     #fn);                                                     \
+        }                                                                      \
+      } while (0)
+    ADD_MICRO_OP(AddAveragePool2D);
+    ADD_MICRO_OP(AddMaxPool2D);
+    ADD_MICRO_OP(AddConv2D);
+    ADD_MICRO_OP(AddDepthwiseConv2D);
+    ADD_MICRO_OP(AddShape);
+    ADD_MICRO_OP(AddStridedSlice);
+    ADD_MICRO_OP(AddPack);
+    ADD_MICRO_OP(AddReshape);
+    ADD_MICRO_OP(AddSoftmax);
+    ADD_MICRO_OP(AddFullyConnected);
+    ADD_MICRO_OP(AddRsqrt);
+    ADD_MICRO_OP(AddReduceMax);
+    ADD_MICRO_OP(AddQuantize);
+    ADD_MICRO_OP(AddDequantize);
+    ADD_MICRO_OP(AddAdd);
+    ADD_MICRO_OP(AddMul);
+    ADD_MICRO_OP(AddMean);
+    ADD_MICRO_OP(AddPad);
+    ADD_MICRO_OP(AddLeakyRelu);
+    ADD_MICRO_OP(AddRelu);
+    ADD_MICRO_OP(AddRelu6);
+    ADD_MICRO_OP(AddConcatenation);
+    ADD_MICRO_OP(AddSub);
+    ADD_MICRO_OP(AddMinimum);
+    ADD_MICRO_OP(AddMaximum);
+    #undef ADD_MICRO_OP
     resolver_registered = true;
   }
   #endif
@@ -2180,45 +2273,83 @@ void setup() {
   uint32_t sram_large  = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   uint32_t spiram_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   uint32_t spiram_large= (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-  printf("SRAM: free=%u largest=%u | PSRAM: free=%u largest=%u | arena_req=%u\n",
-         sram_free, sram_large, spiram_free, spiram_large, (uint32_t)kTensorArenaSize);
+  Serial.printf("SRAM: free=%u largest=%u | PSRAM: free=%u largest=%u | arena_req=%u\r\n",
+                (unsigned)sram_free, (unsigned)sram_large,
+                (unsigned)spiram_free, (unsigned)spiram_large,
+                (unsigned)kTensorArenaSize);
 
-  tensor_arena = (uint8_t*) heap_caps_aligned_alloc(
-        16,
-        kTensorArenaSize,
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
-    );
+  auto make_interpreter = [&](uint8_t *arena, size_t bytes) {
+    return new (std::nothrow) tflite::MicroInterpreter(
+        model, micro_op_resolver, arena, bytes, nullptr, nullptr, false);
+  };
+
+  size_t arena_bytes = kTensorArenaSize;
+  tensor_arena = (uint8_t *)heap_caps_aligned_alloc(
+      16, arena_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   const char *arena_location = "SRAM";
 
   if (tensor_arena == nullptr) {
-    printf("Tensor arena: SRAM %u too small (largest=%u), falling back to PSRAM.\n",
-           sram_free, sram_large);
-    tensor_arena = (uint8_t*) heap_caps_aligned_alloc(
-          16,
-          kTensorArenaSize,
-          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-      );
-    arena_location = "PSRAM (fallback: SRAM insufficient)";
+    Serial.printf("Tensor arena: SRAM %u too small (largest=%u), trying PSRAM.\r\n",
+                  (unsigned)sram_free, (unsigned)sram_large);
+    tensor_arena = (uint8_t *)heap_caps_aligned_alloc(
+        16, arena_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    arena_location = "PSRAM (SRAM allocation failed)";
   }
-
   if (tensor_arena == nullptr) {
-    printf("Failed to allocate tensor arena!\n");
-    return;
+    SIGN_FATAL("could not allocate the %u-byte tensor arena in SRAM or PSRAM",
+               (unsigned)arena_bytes);
   }
-  printf("Tensor arena: %u bytes in %s @ %p\n",
-         (uint32_t)kTensorArenaSize, arena_location, (const void*)tensor_arena);
 
-  static tflite::MicroInterpreter static_interpreter(
-      model, micro_op_resolver, tensor_arena, kTensorArenaSize, nullptr, nullptr, false);
-  interpreter = &static_interpreter;
+  Serial.printf("Tensor arena: %u bytes in %s @ %p\r\n",
+                (unsigned)arena_bytes, arena_location,
+                (const void *)tensor_arena);
+  tflite::MicroInterpreter *interp = make_interpreter(tensor_arena, arena_bytes);
+  if (interp == nullptr) {
+    SIGN_FATAL("could not construct the TFLM interpreter");
+  }
+  TfLiteStatus allocate_status = interp->AllocateTensors();
 
-
-  // Allocate memory from the tensor_arena for the model's tensors.
-  TfLiteStatus allocate_status = interpreter->AllocateTensors();
+  // Compact models fit in the 320 KB SRAM arena.  If an older/bloated export
+  // still needs more, retry once with the legacy 8 MB PSRAM arena — and say
+  // loudly that this happened, because it is slow and should be re-exported.
+  if (allocate_status != kTfLiteOk && arena_bytes < kTensorArenaFallbackSize) {
+    Serial.printf("FATAL-ish: AllocateTensors() failed with the %u-byte %s arena "
+                  "(used=%u); retrying with %u bytes in PSRAM.\r\n",
+                  (unsigned)arena_bytes, arena_location,
+                  (unsigned)interp->arena_used_bytes(),
+                  (unsigned)kTensorArenaFallbackSize);
+    delete interp;
+    interp = nullptr;
+    heap_caps_free(tensor_arena);
+    tensor_arena = (uint8_t *)heap_caps_aligned_alloc(
+        16, kTensorArenaFallbackSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    arena_bytes = kTensorArenaFallbackSize;
+    arena_location = "PSRAM (AllocateTensors fallback)";
+    if (tensor_arena == nullptr) {
+      SIGN_FATAL("AllocateTensors() needs more than %u bytes and the %u-byte "
+                 "PSRAM fallback could not be allocated",
+                 (unsigned)kTensorArenaSize, (unsigned)kTensorArenaFallbackSize);
+    }
+    Serial.printf("Tensor arena retry: %u bytes in %s @ %p\r\n",
+                  (unsigned)arena_bytes, arena_location,
+                  (const void *)tensor_arena);
+    interp = make_interpreter(tensor_arena, arena_bytes);
+    if (interp == nullptr) {
+      SIGN_FATAL("could not construct the TFLM interpreter on the fallback arena");
+    }
+    allocate_status = interp->AllocateTensors();
+  }
   if (allocate_status != kTfLiteOk) {
-    TF_LITE_REPORT_ERROR(error_reporter, "AllocateTensors() failed");
-    return;
+    const unsigned used = interp ? (unsigned)interp->arena_used_bytes() : 0;
+    delete interp;
+    interp = nullptr;
+    SIGN_FATAL("AllocateTensors() failed with a %u-byte arena in %s "
+               "(arena_used=%u) — the model needs more memory or an op is "
+               "missing from the resolver; see the op list above",
+               (unsigned)arena_bytes, arena_location, used);
   }
+  s_arena_bytes = arena_bytes;
+  interpreter = interp;
 
   // Get information about the memory area to use for the model's input.
   input = interpreter->input(0);
@@ -2364,12 +2495,13 @@ void setup() {
   }
 
   // --- Diagnostics ---
+  const size_t arena_total = s_arena_bytes ? s_arena_bytes : kTensorArenaSize;
   Serial.print("Arena used: ");
   Serial.print(interpreter->arena_used_bytes());
   Serial.print(" / ");
-  Serial.print(kTensorArenaSize);
+  Serial.print((unsigned)arena_total);
   Serial.print(" (");
-  Serial.print((int)(interpreter->arena_used_bytes() * 100LL / kTensorArenaSize));
+  Serial.print((int)(interpreter->arena_used_bytes() * 100LL / arena_total));
   Serial.println("%)");
 
   Serial.print("Input: ");

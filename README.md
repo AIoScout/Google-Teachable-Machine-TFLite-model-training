@@ -102,6 +102,13 @@ belongs to.
   `_background` class.  The export carries `TM_SIGN_USE_BACKGROUND_OOD`,
   `kSignBackgroundReplacesOod` and `kBackgroundClassIndex` (-1 when absent);
   the legacy `kSignBackgroundIsTheOnlyRejector` spelling is emitted too.
+- The OCR/sign glyph head is compact (`conv -> 1x1 Conv2D(16) -> Flatten ->
+  Dense(128) -> softmax`), so the checked-in `TFLite_Sign/tm.tflite` is
+  ~125 KB and the device's first-choice tensor arena is 320 KB internal
+  SRAM.  `TFLite_Sign.ino` prints the model's operator codes before
+  allocation, names every resolver/arena/allocation failure as `FATAL:` on
+  USB Serial, and retries once with an 8 MB PSRAM arena only if the compact
+  arena cannot allocate.
 - Export route: `TFLite_Sign/TFLite_Sign.ino` (compile-time
   `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`).
 
