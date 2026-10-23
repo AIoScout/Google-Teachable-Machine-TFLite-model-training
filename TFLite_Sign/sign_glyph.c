@@ -500,23 +500,79 @@ static int round_half_up_i64(int64_t num, int64_t den) {
   return (int)(-((-2 * num + den) / (2 * den)));
 }
 
+/* Python ocr_preprocess._narrow_stroke_radius: how many pixels to widen a
+ * thin single-stroke glyph on each side before the CANON paste.  A camera
+ * '1' is a 1-2 px bar; EMNIST '1' samples are 3-4 px, and the mismatch made
+ * the stroke read as _background.  Same integer arithmetic as Python:
+ * ink bbox aspect < 35 %, stroke = round_half_up(total_ink / bbox_height),
+ * projected through the same round-half-up resize, target >= 3 px. */
+static int narrow_stroke_radius(const uint8_t *ink, int w, int x1, int y1,
+                                int x2, int y2, int out_size) {
+  int min_x = x2, max_x = x1 - 1, min_y = y2, max_y = y1 - 1;
+  for (int y = y1; y < y2; y++) {
+    const uint8_t *row = ink + (size_t)y * (size_t)w;
+    for (int x = x1; x < x2; x++) {
+      if (!row[x]) continue;
+      if (x < min_x) min_x = x;
+      if (x > max_x) max_x = x;
+      if (y < min_y) min_y = y;
+      if (y > max_y) max_y = y;
+    }
+  }
+  if (max_x < min_x || max_y < min_y) return 0;
+  const int bw = max_x - min_x + 1;
+  const int bh = max_y - min_y + 1;
+  if (bw <= 0 || bh <= 0) return 0;
+  if (bw * 100 > 35 * bh) return 0;
+  int64_t total = 0;
+  for (int y = min_y; y <= max_y; y++) {
+    const uint8_t *row = ink + (size_t)y * (size_t)w;
+    for (int x = min_x; x <= max_x; x++) total += row[x] ? 1 : 0;
+  }
+  if (total <= 0) return 0;
+  int stroke = (int)((2 * total + bh) / (2 * (int64_t)bh));
+  if (stroke < 1) stroke = 1;
+  const int cw = x2 - x1;
+  const int ch = y2 - y1;
+  const int long_side = (cw > ch) ? cw : ch;
+  if (long_side <= 0) return 0;
+  int fit = (out_size == SIGN_GLYPH_SIZE)
+                ? SIGN_GLYPH_CANON_FIT
+                : (out_size * SIGN_GLYPH_CANON_FIT) / SIGN_GLYPH_SIZE;
+  if (fit < 1) fit = 1;
+  const int target_src = (3 * long_side + fit - 1) / fit;
+  if (stroke >= target_src) return 0;
+  const int r = (target_src - stroke + 1) / 2;
+  return (r > 4) ? 4 : r;
+}
+
 /* CANON: _scale_to_fit (longer side -> 20, aspect preserved, integer
- * round-half-up) -> _paste_centred -> integer centre-of-mass shift.  The
- * resize and the paste are fused: nn_resize is a pure gather and paste is a
- * copy, so addressing the source directly is the same image. */
+ * round-half-up) -> optional horizontal stroke widening -> _paste_centred
+ * -> integer centre-of-mass shift.  The resize and the paste are fused:
+ * nn_resize is a pure gather and paste is a copy, so addressing the source
+ * directly is the same image. */
 static void normalise_canon(const uint8_t *src, int stride, int w, int h,
-                            int out_size, uint8_t *canvas, uint8_t *canvas2) {
+                            int out_size, uint8_t *canvas, uint8_t *canvas2,
+                            int narrow_radius, SignPolarity polarity) {
   int fit = (out_size == SIGN_GLYPH_SIZE)
                 ? SIGN_GLYPH_CANON_FIT
                 : (out_size * SIGN_GLYPH_CANON_FIT) / SIGN_GLYPH_SIZE;
   if (fit < 1) fit = 1;
 
-  const int long_side = (h > w) ? h : w;
+  /* Python normalise_glyph(narrow_radius=...): widen the SOURCE crop
+   * horizontally by `pad` on each side BEFORE the fit.  Doing it after
+   * the resize would be too late — nearest-neighbour downsampling samples
+   * every ~long/fit-th source column and can skip a 1 px stroke.  The
+   * added source columns take the plate tone (255 for dark ink, 0 for
+   * bright ink); the glyph stays centred because the padding is symmetric. */
+  const int pad = (narrow_radius > 0) ? narrow_radius : 0;
+  const int w_pad = w + 2 * pad;
+  const int long_side = (h > w_pad) ? h : w_pad;
   memset(canvas, 0, (size_t)out_size * (size_t)out_size);
   if (long_side <= 0) return;
 
   int nh = (2 * h * fit + long_side) / (2 * long_side);
-  int nw = (2 * w * fit + long_side) / (2 * long_side);
+  int nw = (2 * w_pad * fit + long_side) / (2 * long_side);
   if (nh < 1) nh = 1;
   if (nw < 1) nw = 1;
   if (nh > fit) nh = fit;
@@ -524,13 +580,32 @@ static void normalise_canon(const uint8_t *src, int stride, int w, int h,
 
   const int dst_y0 = (out_size - nh) / 2;
   const int dst_x0 = (out_size - nw) / 2;
+  const int fill = (polarity == SIGN_INK_DARK) ? 255 : 0;
 
   for (int oy = 0; oy < nh; oy++) {
     const int sy = nn_index(oy, h, nh);
     const uint8_t *row = src + (size_t)sy * (size_t)stride;
     uint8_t *drow = canvas + (size_t)(dst_y0 + oy) * (size_t)out_size + dst_x0;
+    if (pad == 0) {
+      for (int ox = 0; ox < nw; ox++) {
+        drow[ox] = row[nn_index(ox, w, nw)];
+      }
+      continue;
+    }
     for (int ox = 0; ox < nw; ox++) {
-      drow[ox] = row[nn_index(ox, w, nw)];
+      const int sp = nn_index(ox, w_pad, nw);
+      int best = fill;
+      for (int k = sp - pad; k <= sp + pad; k++) {
+        const int sx = k - pad;
+        if (sx < 0 || sx >= w) continue;
+        const int v = row[sx];
+        if (polarity == SIGN_INK_DARK) {
+          if (v < best) best = v;
+        } else if (v > best) {
+          best = v;
+        }
+      }
+      drow[ox] = (uint8_t)best;
     }
   }
 
@@ -575,7 +650,10 @@ bool sign_normalise_glyph(const uint8_t *crop, int w, int h, int out_size,
     return true;
   }
   if (convention != SIGN_NORM_CANON || !canvas2) return false;
-  normalise_canon(crop, w, w, h, out_size, canvas, canvas2);
+  /* The standalone normaliser has no ink mask, so it cannot measure a
+   * narrow stroke; preprocess_glyph (the caller that has one) passes the
+   * radius itself. */
+  normalise_canon(crop, w, w, h, out_size, canvas, canvas2, 0, SIGN_INK_DARK);
   return true;
 }
 
@@ -676,7 +754,10 @@ static bool preprocess_common(const uint8_t *gray, int w, int h, int out_size,
     normalise_stretch(crop, w, cw, ch, out_size, s->canvas);
   } else {
     if (!s->canvas2) return false;
-    normalise_canon(crop, w, cw, ch, out_size, s->canvas, s->canvas2);
+    const int radius = narrow_stroke_radius(s->ink, w, x1, y1, x2, y2,
+                                            out_size);
+    normalise_canon(crop, w, cw, ch, out_size, s->canvas, s->canvas2,
+                    radius, polarity);
   }
   memcpy(glyph_out, s->canvas, out_px);
 
@@ -802,20 +883,37 @@ bool preprocess_sign_sequence_c(const uint8_t *gray_in, int w, int h,
   for (int idx = 0; idx < n; idx++) {
     const SignBox b = scratch->boxes[idx];
     SignSlotInfo *sl = &slots[idx];
-    sl->box = b;
     sl->thresh = 0;
     sl->ok = false;
     sl->empty = true;
 
-    const int cw = b.x2 - b.x1;
-    const int ch = b.y2 - b.y1;
+    /* Python preprocess_sign_sequence pads every slot by max(2, 8 % of
+     * the smaller side) so a stroke-only '1' keeps enough bright plate
+     * context not to read as _background.  Mirror it exactly, including
+     * the integer rounding and clamping. */
+    int bw = b.x2 - b.x1;
+    int bh = b.y2 - b.y1;
+    if (bw < 1) bw = 1;   /* Python: bw = max(1, x2 - x1) */
+    if (bh < 1) bh = 1;
+    const int smaller = (bw < bh) ? bw : bh;
+    int pad = (smaller * 8 + 50) / 100;
+    if (pad < 2) pad = 2;
+    SignBox pb;
+    pb.x1 = (b.x1 - pad > 0) ? (b.x1 - pad) : 0;
+    pb.y1 = (b.y1 - pad > 0) ? (b.y1 - pad) : 0;
+    pb.x2 = (b.x2 + pad < w) ? (b.x2 + pad) : w;
+    pb.y2 = (b.y2 + pad < h) ? (b.y2 + pad) : h;
+    sl->box = pb;
+
+    const int cw = pb.x2 - pb.x1;
+    const int ch = pb.y2 - pb.y1;
     if (cw <= 0 || ch <= 0) continue;   /* Python: crop.size == 0 -> blank */
 
     /* Copy the strided crop into the scratch gray buffer.  A copy is safe:
      * Otsu, the mask and the normaliser all read values, not addresses. */
     for (int y = 0; y < ch; y++) {
       memcpy(scratch->gray + (size_t)y * (size_t)cw,
-             gray_in + (size_t)(b.y1 + y) * (size_t)w + (size_t)b.x1,
+             gray_in + (size_t)(pb.y1 + y) * (size_t)w + (size_t)pb.x1,
              (size_t)cw);
     }
 

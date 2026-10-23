@@ -58,18 +58,30 @@ belongs to.
   whole 3-character sign is not split for training.
 - Preview first locates the sign ROI on the **native** 160×160 / 96×96
   frame: Manual ROI when pinned; when Dark/Lum are tuned, an ink-cluster of
-  the three interior character blobs (border-touching/oversized/tiny
-  components dropped); otherwise the bright inner plate.  It crops and
-  strips border-frame/noise ink, then splits the three glyphs.  The response
-  carries `roi_box` plus a real `sign_pct`, and the overlay wraps the
-  characters rather than the full scene.
-- `Orig` renders the **Dark/Lum threshold view** (ink black, everything
-  else pure white); `ROI` adds the rectangle.  The Edit modal's Processed
-  Preview is black-on-white cropped to the ROI, as are the three
-  `.signmatch-slot` thumbnails; no slot strip is glued onto the stage.
+  the three interior character blobs (anything within 6 % of the frame edge
+  and oversized/tiny components dropped); otherwise the bright inner plate.
+  The ROI is the cluster union plus one uniform 10 % pad (tight and
+  symmetric).  It crops and strips border-frame/noise ink, then splits the
+  three glyphs.  The response carries `roi_box` plus a real `sign_pct`.
+- **ROI OFF** shows the full frame (thresholded by default, raw with Orig)
+  and draws the rectangle; **ROI ON** zooms to the cropped ROI content and
+  hides the rectangle.  **Orig OFF (default)** is the Dark/Lum threshold
+  view (ink black, everything else pure white); **Orig ON** is the original
+  grayscale.  The Edit modal's Processed Preview is black-on-white cropped
+  to the ROI, as are the three `.signmatch-slot` thumbnails; no slot strip
+  is glued onto the stage.
+- Each slot crop gets an 8 % (min 2 px) plate-context margin before glyph
+  normalization, so a stroke-only `1` does not collapse to a nearly-black
+  tensor and read as `_background`.  Under `NORM_CANON` a narrow glyph
+  (ink bbox `w/h < 0.35`) is also widened to a 3-4 px stroke **before** the
+  nearest-neighbour fit, matching the EMNIST `1` training samples; the C
+  mirror applies the same margin and widening.  The reject class is built
+  from textured whole patches (plus a 10 % all-zero minority) and never
+  from centered stroke-like bars.
 - The Preview stage is a 1:1 square, so a square device frame fills it
-  without side letterboxing; the overlay is positioned on the image content.
-  The Edit modal is centred with 1:1 Original/Processed stages.
+  without side letterboxing; webcam frames for glyph projects are
+  center-cropped to 1:1 on ingest.  The Edit modal is centred with 1:1
+  Original/Processed stages.
 - Inference splits the sign into three boxes, runs the same 28×28 glyph
   classifier three times, and requires **all three** slots to match the
   target and clear the confidence floor before returning `YES`.
