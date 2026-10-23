@@ -138,6 +138,23 @@ static_assert(kSignReadingOrder == 0 || kSignReadingOrder == 1,
               "kSignReadingOrder must be 0 (LTR) or 1 (RTL)");
 static_assert(kSignMatchMinProb >= 0.0f && kSignMatchMinProb <= 1.0f,
               "kSignMatchMinProb must be a probability in [0,1]");
+// Multi-plate whitelist accessors.  New exports carry the full table; older
+// exports keep their single kTargetSignSequence/kTargetSignClassIndices and
+// behave as a one-plate whitelist.
+#ifndef TM_SIGN_MULTI_TARGET_EXPORTED
+#define TM_SIGN_MULTI_TARGET_EXPORTED 0
+#endif
+#if TM_SIGN_MULTI_TARGET_EXPORTED
+static_assert(kTargetSignCount >= 1 && kTargetSignCount <= 16,
+              "kTargetSignCount must be 1..16");
+#define SIGN_PLATE_COUNT kTargetSignCount
+#define SIGN_PLATE_CLASS(p, s) (kTargetSignClassMatrix[(p)][(s)])
+#define SIGN_PLATE_TEXT(p) (kTargetSignSequences[(p)])
+#else
+#define SIGN_PLATE_COUNT 1
+#define SIGN_PLATE_CLASS(p, s) ((void)(p), kTargetSignClassIndices[(s)])
+#define SIGN_PLATE_TEXT(p) ((void)(p), kTargetSignSequence)
+#endif
 // Same class of tripwire for the USER CONFIG frame size.  The front-end
 // refuses frames outside sign_glyph.h's envelope (1 <= w <= SIGN_MAX_W,
 // w*h <= SIGN_MAX_PIXELS) and our caller passes w == h == g_frame_side, so the
@@ -1744,6 +1761,7 @@ static void inference_task(void *arg) {
     uint8_t slot_label[SIGN_SEQUENCE_LEN] = {0};
     uint8_t slot_conf[SIGN_SEQUENCE_LEN] = {0};
     float   slot_prob[SIGN_SEQUENCE_LEN] = {0.0f};
+    bool    slot_accept[SIGN_SEQUENCE_LEN] = {false};
     bool    slot_match[SIGN_SEQUENCE_LEN] = {false};
     int     slot_best_min = 255;   // weakest slot's best raw score → wire confidence
     int     slots_matched = 0;
@@ -1786,19 +1804,14 @@ static void inference_task(void *arg) {
           ood_is_in_distribution(s_sign_info.sign_pct, output, &max_prob,
                                  &entropy_ratio);
       const bool is_background = is_background_id(slot_label[slot]);
-      const int target = kTargetSignClassIndices[slot];
 
-      // The device mirror of _preview_predict_sign_ocr()'s per-slot rule:
-      //   slot.ok (ink) AND real class AND label == target AND prob >= floor.
-      // np.float32(best)/np.float32(total) is the same single-precision
-      // division pick_label_and_confidence() performs on the raw int8 values.
-      slot_match[slot] = s_slot_info[slot].ok &&
-                         in_distribution &&
-                         !is_background &&
-                         target >= 0 &&
-                         (int)slot_label[slot] == target &&
-                         prob >= kSignMatchMinProb;
-      if (slot_match[slot]) slots_matched++;
+      // A slot is READABLE independent of which plate we compare it to:
+      // ink, a real class, OOD in-distribution and the confidence floor.
+      // The plate loop below decides which target character it must equal.
+      slot_accept[slot] = s_slot_info[slot].ok &&
+                          in_distribution &&
+                          !is_background &&
+                          prob >= kSignMatchMinProb;
       (void)max_prob;
       (void)entropy_ratio;
       (void)total_raw;
@@ -1809,6 +1822,38 @@ static void inference_task(void *arg) {
       vTaskDelay(pdMS_TO_TICKS(1));
       continue;
     }
+
+    // ── compare the three readings against EVERY allowed plate ──────────
+    // Exact 3-for-3 wins immediately.  If none is exact, keep the closest
+    // plate (most slots hit) for the diagnostic target chars; the verdict is
+    // still NO.  Old exports have exactly one plate via the macros.
+    int matched_plate = -1;
+    int chosen_plate = 0;
+    int best_hits = -1;
+    for (int p = 0; p < SIGN_PLATE_COUNT; p++) {
+      int hits = 0;
+      for (int s = 0; s < SIGN_SEQUENCE_LEN; s++) {
+        const int t = SIGN_PLATE_CLASS(p, s);
+        if (slot_accept[s] && t >= 0 && (int)slot_label[s] == t) hits++;
+      }
+      if (hits == SIGN_SEQUENCE_LEN) {
+        matched_plate = p;
+        chosen_plate = p;
+        best_hits = hits;
+        break;
+      }
+      if (hits > best_hits) {
+        best_hits = hits;
+        chosen_plate = p;
+      }
+    }
+    for (int s = 0; s < SIGN_SEQUENCE_LEN; s++) {
+      const int t = SIGN_PLATE_CLASS(chosen_plate, s);
+      slot_match[s] = slot_accept[s] && t >= 0 &&
+                      (int)slot_label[s] == t;
+      if (slot_match[s]) slots_matched++;
+    }
+    const bool all_match = (matched_plate >= 0 && slots_matched == SIGN_SEQUENCE_LEN);
     uint64_t t_invoke_us = esp_timer_get_time() - t_invoke_start;
 
     // Accumulate timing (clamp in case of store-tear / wrap / cache garbage)
@@ -1826,7 +1871,6 @@ static void inference_task(void *arg) {
     // A MATCH therefore requires the ink check, the per-slot class check, the
     // "_background" rejection AND the confidence floor; one slot failing any
     // of them is a NO.
-    const bool all_match = (slots_matched == SIGN_SEQUENCE_LEN);
     const bool no_sign = s_sign_info.empty;
 
     uint8_t pkt_flags = kFlagsSignReady;
@@ -1850,13 +1894,13 @@ static void inference_task(void *arg) {
       if (no_sign) {
         Serial.print("NO SIGN (frame has no ink)");
       } else if (all_match) {
-        Serial.print("MATCH (YES)");
+        Serial.printf("MATCH (YES) plate=%s", SIGN_PLATE_TEXT(matched_plate));
       } else {
         Serial.print("NO MATCH (NO)");
       }
       for (int slot = 0; slot < SIGN_SEQUENCE_LEN; slot++) {
         Serial.printf("  [%d] '%c'->%s %.2f%s",
-                      slot, kTargetSignSequence[slot],
+                      slot, SIGN_PLATE_TEXT(chosen_plate)[slot],
                       label_name(slot_label[slot]),
                       (double)slot_prob[slot],
                       slot_match[slot] ? "" : " (FAIL)");
@@ -2294,24 +2338,28 @@ void setup() {
                   (double)kOodEntropyRatioMax, (double)kSignMatchMinProb);
   }
 
-  // ── The exported target must address real, non-background classes ────
-  // kTargetSignClassIndices is generated from the project's label list; a
-  // stale export can point past it or at "_background" (which can never
-  // match).  Fail at boot instead of reporting NO MATCH forever.
-  for (int slot = 0; slot < SIGN_SEQUENCE_LEN; slot++) {
-    const int idx = kTargetSignClassIndices[slot];
-    if (idx < -1 || idx >= kCategoryCount) {
-      Serial.printf("FATAL: kTargetSignClassIndices[%d] = %d is outside [-1, %d) — "
-                    "re-export the sign_ocr project.\r\n",
-                    slot, idx, (int)kCategoryCount);
-      Serial.flush();
-      for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
-    }
-    if (idx >= 0 && is_background_id((uint8_t)idx)) {
-      Serial.printf("FATAL: kTargetSignClassIndices[%d] points at \"_background\" — "
-                    "re-export the sign_ocr project.\r\n", slot);
-      Serial.flush();
-      for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+  // ── The exported whitelist must address real, non-background classes ──
+  // Every row of kTargetSignClassMatrix is generated from the project's label
+  // list; a stale export can point past it or at "_background" (which can
+  // never match).  Fail at boot instead of reporting NO MATCH forever.
+  Serial.printf("Sign targets: %d allowed plate(s)\r\n", (int)SIGN_PLATE_COUNT);
+  for (int p = 0; p < SIGN_PLATE_COUNT; p++) {
+    for (int slot = 0; slot < SIGN_SEQUENCE_LEN; slot++) {
+      const int idx = SIGN_PLATE_CLASS(p, slot);
+      if (idx < -1 || idx >= kCategoryCount) {
+        Serial.printf("FATAL: plate '%s' slot %d class index %d is outside [-1, %d) — "
+                      "re-export the sign_ocr project.\r\n",
+                      SIGN_PLATE_TEXT(p), slot, idx, (int)kCategoryCount);
+        Serial.flush();
+        for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+      }
+      if (idx >= 0 && is_background_id((uint8_t)idx)) {
+        Serial.printf("FATAL: plate '%s' slot %d points at \"_background\" — "
+                      "re-export the sign_ocr project.\r\n",
+                      SIGN_PLATE_TEXT(p), slot);
+        Serial.flush();
+        for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+      }
     }
   }
 
