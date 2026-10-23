@@ -56,6 +56,13 @@ belongs to.
   time.  EMNIST Auto-Fill supplies these glyphs directly.  Camera/upload
   samples must isolate the character for their class (Manual ROI/crop) — a
   whole 3-character sign is not split for training.
+- Preview first locates the bright sign plate on the **native** 160×160 /
+  96×96 frame (Manual ROI when pinned, otherwise `find_sign_roi`), crops and
+  strips border-frame/noise ink, then splits the three glyphs.  The response
+  carries `roi_box` plus a real `sign_pct`, and the ROI overlay wraps the
+  plate rather than the full scene.
+- The Preview stage is a 1:1 square, so a square device frame fills it
+  without side letterboxing; the overlay is positioned on the image content.
 - Inference splits the sign into three boxes, runs the same 28×28 glyph
   classifier three times, and requires **all three** slots to match the
   target and clear the confidence floor before returning `YES`.
