@@ -66,7 +66,7 @@ limitations under the License.
 #define TM_PREPROCESS_FRAME_SIDE 96
 #endif
 
-constexpr int  g_frame_side      = TM_CAPTURE_FRAME_SIDE;
+constexpr int  g_frame_side      = 160;
 constexpr int  g_preprocess_side = TM_PREPROCESS_FRAME_SIDE;
 constexpr bool g_flip_180        = true;
 
@@ -1863,7 +1863,6 @@ static void inference_task(void *arg) {
       const bool in_distribution =
           ood_is_in_distribution(s_sign_info.sign_pct, output, &max_prob,
                                  &entropy_ratio, &entropy_only);
-      slot_entropy_only[slot] = entropy_only;
       const bool is_background = is_background_id(slot_label[slot]);
 
       // A slot is READABLE independent of which plate we compare it to:
@@ -1872,9 +1871,9 @@ static void inference_task(void *arg) {
       // An entropy-only rejection is NOT decisive: if this slot's top class
       // turns out to be an allowed plate's target character (and prob
       // cleared the floor), the plate loop accepts it.  A correct reading
-      // used to be reported as NO because a multi-plate class set pushes
-      // entropy_ratio above the 0.70 gate.  sign_pct / max_prob still
-      // reject unconditionally.
+      // used to be reported as NO because the model's class distribution
+      // can push entropy_ratio above 0.70 even when every top class is
+      // right.  sign_pct / max_prob still reject unconditionally.
       slot_accept[slot] = s_slot_info[slot].ok &&
                           (in_distribution || entropy_only) &&
                           !is_background &&
