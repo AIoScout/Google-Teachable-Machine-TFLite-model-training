@@ -1504,6 +1504,22 @@ static bool sign_feed_slots() {
     frame_side = g_preprocess_side;
   }
 
+  // Dark / Lum are RUNTIME: setup() seeds them from the exported
+  // kBgDarkThresh/kBgLumThresh, and Serial `set mask D L` updates them.
+  // Derive the splitter's threshold exactly as the host preview does:
+  //   0/100            -> exact Otsu (-1), no floor
+  //   any other window -> threshold = clamp(lum - 1, 1, 254)
+  //                       floor     = dark <= 0 ? 0 : clamp(dark + 1, 0, 255)
+  int cur_dark = 0, cur_lum = 100;
+  ImageProviderGetMaskThresholds(&cur_dark, &cur_lum);
+  const bool mask_adjusted = (cur_dark != 0) || (cur_lum != 100);
+  const int pinned_thresh = mask_adjusted
+      ? (cur_lum - 1 < 1 ? 1 : (cur_lum - 1 > 254 ? 254 : cur_lum - 1))
+      : -1;
+  const int dark_thr = !mask_adjusted ? 0
+      : (cur_dark <= 0 ? 0
+                       : (cur_dark + 1 > 255 ? 255 : cur_dark + 1));
+
   const bool ok = preprocess_sign_sequence_c(
       frame, frame_side, frame_side, SIGN_GLYPH_SIZE,
       SIGN_SEQUENCE_LEN,
@@ -1511,8 +1527,8 @@ static bool sign_feed_slots() {
       kSignPolarity,      /* captures: dark ink on a bright sign    */
       kSignSegment,
       kSignMinRun,        /* = 2, matches Python MIN_GLYPH_RUN      */
-      kSignPinnedThresh,  /* -1 = exact Otsu (0 is a PINNED 0)      */
-      kSignDarkThr,       /* 0 = no luminance floor                 */
+      pinned_thresh,      /* -1 = exact Otsu (0 is a PINNED 0)      */
+      dark_thr,           /* 0 = no luminance floor                 */
       kSignConvention,
       &s_sign_scratch, &s_slot_glyphs[0][0], s_slot_info, &s_sign_info);
   if (!ok) {

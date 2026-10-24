@@ -155,6 +155,15 @@ kOodMaxProbMin, kOodEntropyRatioMax)` and
 calls the provider keeps `image_provider.h`'s 0.40 / 0.85 compile-time
 defaults and ignores `model_settings.h` entirely.
 
+`sign_feed_slots()` re-reads the mask window with
+`ImageProviderGetMaskThresholds()` on every frame, so both the exported
+Dark/Lum values and Serial `set mask D L` reach the 3-slot slicer
+immediately (0/100 = exact Otsu, no floor).  Each slot crop strips a small
+disconnected border/corner speck before the bbox and centring, and the
+canonical centre-of-mass shift uses true round-half-up (floor(x+0.5), not
+half-away-from-zero), matching `ocr_preprocess.py` bit-for-bit — a narrow
+`'1'` lands centred at 3–4 px.
+
 The frame verdict is:
 
 | Verdict | Condition |

@@ -324,11 +324,15 @@ static void normalise_stretch(const uint8_t *src, int stride, int w, int h,
   }
 }
 
-/* Integer round-half-up division, positive and negative numerator.
- * Python: _round_half_up(num, den) — same two branches. */
+/* Integer round-half-up on the real line: floor(num/den + 0.5).
+ * Python: _round_half_up(num, den) — Python's floor division makes
+ * (2*num + den) // (2*den) correct for negatives too; C division truncates
+ * toward zero, so negative quotients need an explicit floor. */
 static int round_half_up_i64(int64_t num, int64_t den) {
-  if (num >= 0) return (int)((2 * num + den) / (2 * den));
-  return (int)(-((-2 * num + den) / (2 * den)));
+  const int64_t a = 2 * num + den;
+  const int64_t b = 2 * den;
+  if (a >= 0) return (int)(a / b);
+  return (int)(-(((-a) + b - 1) / b));
 }
 
 /* ── CANON: MNIST/EMNIST convention ──────────────────────────────────────

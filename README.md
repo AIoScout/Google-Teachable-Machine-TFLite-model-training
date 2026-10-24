@@ -66,10 +66,13 @@ belongs to.
   `1`), with the `A` card badged `Slots 1 & 3`.  The sequence still has three
   slots; the class is trained once.
 - Training data is **one character glyph per class** (the same 28×28 glyph
-  model an OCR project trains); the three-way split happens at inference
-  time.  EMNIST Auto-Fill supplies these glyphs directly.  Camera/upload
-  samples must isolate the character for their class (Manual ROI/crop) — a
-  whole 3-character sign is not split for training.
+  model an OCR project trains).  **Auto mode in a sign class card is
+  slot-aware**: a whole `A 1 2` board is split and only that class's slot is
+  kept (`A` → slot 1, `1` → slot 2, `2` → slot 3), so classes are never
+  trained on the whole sign.  Manual ROI / Auto single-glyph crops strip a
+  small disconnected **corner speck** (e.g. a clipped neighbour foot) before
+  the 28×28 centring; the Edit modal's Processed Preview is that exact
+  canonical 28×28 glyph.  EMNIST Auto-Fill supplies clean glyphs directly.
 - **Resolution auto-scaling.**  Camera captures may be larger than the model
   input.  The export stamps three independent sides into
   `model_settings.h` (`TM_CAPTURE_FRAME_SIDE`, `TM_PREPROCESS_FRAME_SIDE`,
@@ -137,8 +140,11 @@ belongs to.
 - The MCU mirrors the host search in `sign_glyph.c`: binarise the frame,
   drop the 6 % border margin / huge frame components / specks, select the
   character band, pad it symmetrically to a `roi_box` (and compute
-  `sign_pct`), then split.  The same integer narrow-stroke widening is
-  applied per slot.  `sign_glyph_host.c` + `tests/test_sign_glyph_parity.py`
+  `sign_pct`), then split.  The same integer narrow-stroke widening and
+  border-speck stripping are applied per slot.  `sign_feed_slots()` reads
+  **Dark/Lum at runtime** via `ImageProviderGetMaskThresholds()`, so the
+  exported model_settings window and Serial `set mask D L` both drive the
+  slicer immediately.  `sign_glyph_host.c` + `tests/test_sign_glyph_parity.py`
   pin Python↔C bit-for-bit.
 - **Settings → Advanced → Use `_background` noise class to replace OOD
   rejection** defaults **OFF** for Car License: the model trains on the
