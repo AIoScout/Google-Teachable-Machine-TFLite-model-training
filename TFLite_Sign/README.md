@@ -147,6 +147,13 @@ A slot matches when **all** of the following hold, mirroring
    `best_raw / total_raw` over `int8 + 128` values — **not** a dequantised
    softmax probability.
 
+`setup()` applies the exported policy before the first inference:
+`ImageProviderSetOodThresholds(kOodSignMinPct, kOodSignMaxPct,
+kOodMaxProbMin, kOodEntropyRatioMax)` and
+`ImageProviderSetMaskThresholds(kBgDarkThresh, kBgLumThresh)`.  Without those
+calls the provider keeps `image_provider.h`'s 0.60 / 0.70 compile-time
+defaults and ignores `model_settings.h` entirely.
+
 The frame verdict is:
 
 | Verdict | Condition |

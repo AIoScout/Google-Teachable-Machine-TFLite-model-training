@@ -2185,6 +2185,12 @@ void setup() {
   // USER CONFIG (top of this file): push the CAPTURE side + g_flip_180 into
   // the camera library before any capture/inference code runs.
   ImageProviderConfigureCamera(g_frame_side, g_flip_180);
+  // Apply the thresholds stamped into model_settings.h.  Without these
+  // calls ood_is_in_distribution() keeps image_provider.h's compile-time
+  // defaults and silently ignores the exported OOD policy / Dark-Lum mask.
+  ImageProviderSetOodThresholds(kOodSignMinPct, kOodSignMaxPct,
+                                kOodMaxProbMin, kOodEntropyRatioMax);
+  ImageProviderSetMaskThresholds(kBgDarkThresh, kBgLumThresh);
   Serial.printf("Camera config: capture=%d preprocess=%d model=%d flip_180=%d\r\n",
                 (int)g_frame_side, (int)g_preprocess_side, (int)kNumCols,
                 (int)g_flip_180);
