@@ -118,10 +118,14 @@ belongs to.
   names the winner (`🟢 YES — MATCH · Plate #2 (B18)`); a near miss reports
   the closest plate, and a reading that is no whitelisted plate is `NO`.
   A slot whose top class **is** that plate's target character and whose
-  probability clears `kSignMatchMinProb` is accepted even when
-  `entropy_ratio` is the only OOD gate that fired — a correct, merely
-  uncertain reading is not a rejection.  `sign_pct` and `max_prob` still
-  reject unconditionally, and the Preview banner names the exact gate.
+  probability clears the match floor is accepted even when `entropy_ratio`
+  is the only OOD gate that fired — a correct, merely uncertain reading is
+  not a rejection.  Layer 1 (`sign_pct`) is **disarmed on the 3-slot path**
+  (it is a diagnostic there); `max_prob` still rejects, and the Preview
+  banner names the exact gate.  The floor is a runtime value: the exported
+  `kSignMatchMinProb` (default **0.40**) is the boot default, and Serial
+  `set ood spmin spmax mpmin ermax` sets it to `mpmin` on both the P4 and
+  the host preview.
   The `🧪 Synth` pills draw the plate selected in the `Plate #k (…)`
   dropdown next to them (the primary by default), so every allowed car can
   be tested without a photo.
@@ -134,7 +138,8 @@ belongs to.
 - **Settings → Advanced → Use `_background` noise class to replace OOD
   rejection** defaults **OFF** for Car License: the model trains on the
   target characters only and Preview/device reject blank or unknown slots
-  with OOD Layers 1-3 plus the match floor.  ON trains the extra
+  with OOD Layers 2/3 (`max_prob`, entropy) plus the per-slot match floor;
+  Layer 1 `sign_pct` is disarmed on this path.  ON trains the extra
   `_background` class.  The export carries `TM_SIGN_USE_BACKGROUND_OOD`,
   `kSignBackgroundReplacesOod` and `kBackgroundClassIndex` (-1 when absent);
   the legacy `kSignBackgroundIsTheOnlyRejector` spelling is emitted too.
@@ -294,7 +299,8 @@ Otsu (integer) → vertical-projection split/segment → 28×28 canvas
 - RTL reading order reverses the box list after the split — never the pixels.
 - The sign verdict is `YES` only when all three slots name **the same
   allowed plate**'s characters, none is `_background`, each clears
-  `kSignMatchMinProb` (default 0.60), and each slot contains ink.  The device
+  `kSignMatchMinProb` (default 0.40; `set ood ... <mpmin>` adjusts it at
+  runtime), and each slot contains ink.  The device
   additionally applies OOD layers 2/3 per slot.  Every row of
   `kTargetSignClassMatrix` is checked, so any whitelisted plate can win.
 
@@ -405,7 +411,7 @@ constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
     { 3, 1, 4 },
 };
 constexpr int kSignReadingOrder = 0;      // 0 = LTR, 1 = RTL
-constexpr float kSignMatchMinProb = 0.600000f;
+constexpr float kSignMatchMinProb = 0.400000f;  // boot default; set ood adjusts
 #define TM_SIGN_USE_BACKGROUND_OOD 0
 constexpr bool kSignBackgroundReplacesOod = false;
 constexpr int kBackgroundClassIndex = -1;  // -1 = no _background class

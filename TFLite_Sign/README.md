@@ -89,7 +89,7 @@ constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
     { 3, 1, 4 },
 };
 constexpr int kSignReadingOrder = 0;                   // 0 = LTR, 1 = RTL
-constexpr float kSignMatchMinProb = 0.600000f;
+constexpr float kSignMatchMinProb = 0.400000f;   // boot default; set ood adjusts
 ```
 
 `g_frame_side` is initialized from `kCaptureFrameSide` (the macro), and
@@ -127,13 +127,23 @@ A slot matches when **all** of the following hold, mirroring
 `RecordController._preview_predict_sign_ocr`:
 
 1. `s_slot_info[slot].ok` — the slot's crop contained ink;
-2. `ood_is_in_distribution(...)` — the raw-int8 OOD layers 2/3 agree (Layer 1
-   is disarmed on this path, exactly as in the OCR sketch);
+2. `ood_is_in_distribution(...)` — the raw-int8 OOD layers 2/3 agree.
+   **Layer 1 (`sign_pct`) is disarmed unconditionally** on this path: the
+   split already gates each slot on ink, and a frame-level percentage (often
+   supplied by `set ood`) used to reject all three correct slots at once.
+   An **entropy-only** Layer 3 failure is exempt when this slot's top class
+   is the target of the plate being tested and `prob` clears the floor;
+   `max_prob` still rejects;
 3. the winning class is not `_background` (matched by **name**, not index);
 4. there is an allowed plate whose row in `kTargetSignClassMatrix` names
    this slot's winning class index (every row is tested; all three slots
    must agree on the SAME row);
-5. `prob >= kSignMatchMinProb`, where `prob` is the host's raw ratio
+5. `prob >= s_sign_match_min_prob` — the **runtime** floor.  It starts at
+   the exported `kSignMatchMinProb` (0.40) and `set ood spmin spmax mpmin
+   ermax` updates it to `mpmin` (both the text command and the binary
+   `kCmdSetOodThresholds`), so lowering `mpmin` actually reaches the slot
+   rule instead of only changing Layers 2/3.  `get ood` prints the
+   effective values.  `prob` is the host's raw ratio
    `best_raw / total_raw` over `int8 + 128` values — **not** a dequantised
    softmax probability.
 
@@ -260,7 +270,7 @@ allocation and no per-frame heap allocation.
   `dark_thr` floor is applied ON TOP of that predicate.  Changing either
   comparison invalidates every trained model.
 - **`prob` is the raw-int8 ratio**, on both sides.  Do not switch the device to
-  a softmax/dequantised probability; the host's 0.60 floor is calibrated on the
+  a softmax/dequantised probability; the host's 0.40 floor is calibrated on the
   raw scale.
 - **Slot canvases are quantised into the tensor immediately before each
   Invoke**, so only one 784-byte slot buffer exists in RAM.  Keeping three

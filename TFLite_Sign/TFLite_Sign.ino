@@ -187,7 +187,7 @@ static_assert(g_preprocess_side <= g_frame_side,
 // Rejection policy, exported by the host with the model:
 //   1 = each slot rejects with the model's own "_background" class; the OOD
 //       gates are opened instead of tuned, and the per-slot match rule (ink,
-//       not background, class target, prob >= kSignMatchMinProb) mirrors the
+//       not background, class target, prob >= s_sign_match_min_prob) mirrors the
 //       host preview.
 //   0 = no "_background" class was trained.  The standard OOD gates
 //       (kOodSignMinPct/MaxPct, kOodMaxProbMin, kOodEntropyRatioMax) compose
@@ -250,6 +250,17 @@ TfLiteTensor* input = nullptr;
 // Bi-directional control: S3 can request P4 to stop/start UART transmission.
 // Inference continues regardless; only the TX path is gated.
 static volatile bool s_transmit_enabled = true;
+
+// Per-slot confidence floor — RUNTIME, not kSignMatchMinProb.  The exported
+// constant is only the boot default; `set ood ... <mpmin> ...` (text and the
+// binary kCmdSetOodThresholds) updates this together with the OOD layer so a
+// lowered threshold reaches the slot match rule, not just Layers 2/3.
+static volatile float s_sign_match_min_prob = kSignMatchMinProb;
+static inline float sign_clamp01(float v) {
+  if (v < 0.0f) return 0.0f;
+  if (v > 1.0f) return 1.0f;
+  return v;
+}
 
 // RX diagnostics: count bytes and control packets received from S3.
 static volatile uint32_t s_rx_bytes = 0;
@@ -955,8 +966,8 @@ static void ascii_print_help() {
     "  ping             → PONG\r\n"
     "  get mask         → MASK dark=?? lum=??  (G channel sign-mask)\r\n"
     "  set mask D L     → D=int L=int e.g.  set mask 30 85\r\n"
-    "  get ood          → OOD spmin..spmax mpmin ermax\r\n"
-    "  set ood A B C D  → 4 floats, e.g. set ood 0.5 70.0 0.7 0.65\r\n"
+    "  get ood          → OOD spmin..spmax mpmin ermax (mpmin = per-slot match floor)\r\n"
+    "  set ood A B C D  → 4 floats, e.g. set ood 0.5 70.0 0.4 0.65; C is also the per-slot match floor\r\n"
     "  get mode         → MODE infer|rgb|gray\r\n"
     "  mode infer       → normal inference + UART + SD\r\n"
     "  mode rgb         → pause, dump RAW RGB24 capture frames on serial\r\n"
@@ -983,8 +994,9 @@ static void ascii_dispatch(char *line) {
       Serial.printf("MASK: dark=%d lum=%d\r\n", d, l);
     } else if (0 == strcmp(tok, "ood")) {
       float a,b,c,d; ImageProviderGetOodThresholds(&a,&b,&c,&d);
-      Serial.printf("OOD: sp=%.2f..%.2f mp=%.3f er=%.3f\r\n",
-                    (double)a,(double)b,(double)c,(double)d);
+      Serial.printf("OOD: sp=%.2f..%.2f (disarmed) mp=%.3f er=%.3f match=%.3f\r\n",
+                    (double)a,(double)b,(double)c,(double)d,
+                    (double)s_sign_match_min_prob);
     } else if (0 == strcmp(tok, "mode")) {
       Serial.printf("MODE: %s\r\n", op_mode_name(s_op_mode));
     } else {
@@ -1008,9 +1020,13 @@ static void ascii_dispatch(char *line) {
       if (!*a||!*b||!*c||!*d) { Serial.println(F("ERR: set ood <spmin> <spmax> <mpmin> <ermax>")); return; }
       float fa=(float)atof(a), fb=(float)atof(b), fc=(float)atof(c), fd=(float)atof(d);
       ImageProviderSetOodThresholds(fa,fb,fc,fd);
+      // The third argument (mpmin) is the per-slot confidence floor too:
+      // the slot match rule must follow the same knob the user just lowered.
+      s_sign_match_min_prob = sign_clamp01(fc);
       float a2,b2,c2,d2; ImageProviderGetOodThresholds(&a2,&b2,&c2,&d2);
-      Serial.printf("OK  OOD: sp=%.2f..%.2f mp=%.3f er=%.3f\r\n",
-                    (double)a2,(double)b2,(double)c2,(double)d2);
+      Serial.printf("OK  OOD: sp=%.2f..%.2f mp=%.3f er=%.3f match=%.3f\r\n",
+                    (double)a2,(double)b2,(double)c2,(double)d2,
+                    (double)s_sign_match_min_prob);
     } else {
       Serial.printf("ERR: unknown set '%s', try 'help'\r\n", tok);
     }
@@ -1109,8 +1125,10 @@ static void debug_serial_task(void *arg) {
           float mpmin = read_f32_le(pl + 8);
           float ermax = read_f32_le(pl + 12);
           ImageProviderSetOodThresholds(spmin, spmax, mpmin, ermax);
-          Serial.printf("DEBUG: OOD thresholds → sp=%.2f..%.2f mp=%.3f er=%.3f\n",
-                        (double)spmin, (double)spmax, (double)mpmin, (double)ermax);
+          s_sign_match_min_prob = sign_clamp01(mpmin);
+          Serial.printf("DEBUG: OOD thresholds → sp=%.2f..%.2f mp=%.3f er=%.3f match=%.3f\n",
+                        (double)spmin, (double)spmax, (double)mpmin, (double)ermax,
+                        (double)s_sign_match_min_prob);
           debug_send_ok(cmd);
         } break;
         case kCmdGetOodThresholds: {
@@ -1283,11 +1301,13 @@ static void pick_label_and_confidence(TfLiteTensor *output, uint8_t *label_id,
   if (total_raw_out) *total_raw_out = total_raw;
 }
 
-// Returns true iff the frame is "in-distribution" (we believe there's a real
-// sign in the picture).  Combines (1) sign_mask percentage from the camera
-// pipeline (Layer 1, pre-inference), (2) softmax top-1 probability
-// (Layer 2), and (3) normalised entropy of the distribution (Layer 3).  Any
-// rule that fires → OOD = false → caller should report "No Sign".
+// Returns true iff the slot is "in-distribution".  Layers 2 (top-1 raw
+// probability) and 3 (normalised entropy) are evaluated; Layer 1 (the
+// frame-level sign_pct percentage) is DISARMED on the 3-slot path — the
+// split already gates each slot on ink, and a frame-level window used to
+// reject all three correct slots at once.  `out_entropy_only` reports a
+// Layer-3-only failure so the caller can exempt a slot whose top class is
+// the plate target.  Any decisive rule that fires → OOD = false.
 static bool ood_is_in_distribution(float sign_pct, TfLiteTensor *output,
                                    float *out_max_prob, float *out_entropy_ratio,
                                    bool *out_entropy_only = nullptr) {
@@ -1297,27 +1317,24 @@ static bool ood_is_in_distribution(float sign_pct, TfLiteTensor *output,
   if (out_entropy_ratio) *out_entropy_ratio = 0.0f;
   return true;
 #else
-  float min_pct = 0.0f, max_pct = 0.0f, max_prob_min = 0.0f, entropy_max = 0.0f;
-  ImageProviderGetOodThresholds(&min_pct, &max_pct, &max_prob_min, &entropy_max);
+  float max_prob_min = 0.0f, entropy_max = 0.0f;
+  // Only Layers 2/3 thresholds are read; Layer 1 is disarmed below.
+  ImageProviderGetOodThresholds(nullptr, nullptr, &max_prob_min, &entropy_max);
 
-  // ── sign path: which rejector is authoritative? ───────────────────────
-  // sign_pct comes from sign_frame_ink_pct() (the current frame's in-window
-  // ink share), not from the legacy GetImage() path, so Layer 1 is real when
-  // the OOD policy is active.  With kSignBackgroundReplacesOod the
-  // model's explicit "_background" class is better information than the
-  // dark-pixel prior, so all three gates are opened and the per-slot match
-  // rule (ink + not background + class + prob >= kSignMatchMinProb) mirrors
-  // the host preview exactly.  The values below are still computed for logs.
+  // ── sign path: Layer 1 (sign_pct) is DISARMED ─────────────────────────
+  // sign_pct is a FRAME-level ink percentage.  On the 3-slot sign path the
+  // split already gates every slot on ink inside the character-band ROI;
+  // a frame-level window (especially one supplied by `set ood`) is too
+  // coarse and used to reject all three correct slots at once.  The value
+  // stays available for diagnostics, but it never rejects here.
+  (void)sign_pct;
+  // With kSignBackgroundReplacesOod the model's own "_background" class is
+  // the only rejector, so Layers 2/3 are opened as well; the per-slot match
+  // rule (ink + not background + class + prob >= match floor) still applies.
   if (kSignBackgroundReplacesOod) {
-    min_pct = 0.0f;
-    max_pct = 100.0f;
     max_prob_min = 0.0f;
     entropy_max = 0.0f;
   }
-
-  // Layer 1: sign-mask prior (cheapest; use first)
-  if (min_pct > 0.0f && sign_pct < min_pct) { if (out_max_prob) *out_max_prob = 0.0f; if (out_entropy_ratio) *out_entropy_ratio = 1.0f; return false; }
-  if (max_pct > 0.0f && sign_pct > max_pct) { if (out_max_prob) *out_max_prob = 0.0f; if (out_entropy_ratio) *out_entropy_ratio = 1.0f; return false; }
 
   // Aggregate raw scores for max_prob + entropy.  Use same [0,255] int-score
   // normalisation as pick_label_and_confidence to keep them consistent.
@@ -1877,7 +1894,7 @@ static void inference_task(void *arg) {
       slot_accept[slot] = s_slot_info[slot].ok &&
                           (in_distribution || entropy_only) &&
                           !is_background &&
-                          prob >= kSignMatchMinProb;
+                          prob >= s_sign_match_min_prob;
       (void)max_prob;
       (void)entropy_ratio;
       (void)total_raw;
@@ -2193,10 +2210,10 @@ void setup() {
                 kSignConvention == SIGN_NORM_CANON ? "NORM_CANON" : "NORM_STRETCH",
                 kSignMinRun,
                 kSignPinnedThresh < 0 ? "otsu" : "pinned");
-  Serial.printf("Sign target: \"%s\"  order=%s  match_min_prob=%.2f  window=(dark=%d, lum=%d)%s\r\n",
+  Serial.printf("Sign target: \"%s\"  order=%s  match_min_prob=%.2f (set ood adjusts)  window=(dark=%d, lum=%d)%s\r\n",
                 kTargetSignSequence,
                 kSignReadingOrder ? "RTL" : "LTR",
-                (double)kSignMatchMinProb,
+                (double)s_sign_match_min_prob,
                 (int)kExportDarkThr, (int)kExportLumThr,
                 kSignWindowAdjusted ? "  [sliders active]" : "  [defaults: exact Otsu]");
   if (g_preprocess_side != 96) {
@@ -2523,13 +2540,13 @@ void setup() {
   if (kSignBackgroundReplacesOod) {
     Serial.printf("Sign labels: %d classes, rejection=_background (id %d) + %.2f floor\r\n",
                   (int)kCategoryCount, (int)background_class_id(),
-                  (double)kSignMatchMinProb);
+                  (double)s_sign_match_min_prob);
   } else {
-    Serial.printf("Sign labels: %d classes, rejection=OOD gates (sp=%.1f..%.1f "
-                  "mp>=%.2f er<=%.2f) + %.2f floor\r\n",
-                  (int)kCategoryCount, (double)kOodSignMinPct,
-                  (double)kOodSignMaxPct, (double)kOodMaxProbMin,
-                  (double)kOodEntropyRatioMax, (double)kSignMatchMinProb);
+    Serial.printf("Sign labels: %d classes, rejection=OOD mp>=%.2f er<=%.2f "
+                  "(sign_pct disarmed) + %.2f floor\r\n",
+                  (int)kCategoryCount,
+                  (double)kOodMaxProbMin, (double)kOodEntropyRatioMax,
+                  (double)s_sign_match_min_prob);
   }
 
   // ── The exported whitelist must address real, non-background classes ──
