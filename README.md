@@ -1,4 +1,4 @@
-# AIoScout / TFLite Training — Image, OCR, and 3-Character Road-Sign Studio
+# AIoScout / TFLite Training — Image, OCR, and 🚗 Car License (3-Char) Studio
 
 Desktop trainer for ESP32-P4 tinyML, with an IMX219 camera pipeline and
 three export targets.  Train in the app, export int8 TFLite + C sources,
@@ -18,7 +18,7 @@ belongs to.
 |---|---|---|---|---|
 | **Image** (`image`) | Image Project | 96×96 int8 grayscale by default | one class label + confidence, with a 3-layer OOD gate (`sign_pct` range, max prob, entropy) | `TFLite/` |
 | **OCR / Character** (`ocr`) | 🔠 OCR / Character Project | 28×28 int8 glyph | one character `0–9, A–Z`, plus `_background` rejector | `TFLite_OCR/` |
-| **Car License (3-Char)** (`sign_ocr`) | 🚗 Car License Project | 3 slots × 28×28 int8 glyphs | binary verdict, `🟢 YES — MATCH` / `🔴 NO — NOT MATCH`, from an ordered target sequence | `TFLite_Sign/` |
+| **🚗 Car License Project (3-Char)** (`sign_ocr`) | 🚗 Car License Project | 3 slots × 28×28 int8 glyphs | binary verdict, `🟢 YES — MATCH · Plate #k (B18)` / `🔴 NO — NOT MATCH`, against **one or more** allowed plates | `TFLite_Sign/` |
 
 ### Image Project (`image`)
 
@@ -42,13 +42,23 @@ belongs to.
 - EMNIST mixing and optional two-stage transfer learning (see §3).
 - Export route: `TFLite_OCR/TFLite_OCR.ino` (compile-time `TM_OCR_GLYPH_MODEL 1`).
 
-### Car License Project (`sign_ocr`)
+### 🚗 Car License Project (3-Char) (`sign_ocr`)
 
-- The target sequence is the ONLY class authority: `A ▸ 1 ▸ 2` means exactly
-  the classes `A`, `1`, `2` (duplicates trained once). Stale `Class 1`/
-  `Class 2` folders are pruned from the dataset, processed cache and mixed
-  set on open/sync/train, so they can never become model labels.
-- Declare an ordered 3-character target in `#signSeqBar` (e.g. `A ▸ 1 ▸ 2`).
+- The class list is the **union of every allowed plate's characters**, in
+  first-appearance order: `["A12", "B18"]` means exactly the classes
+  `A, 1, 2, B, 8` (a character shared by two plates is trained once).  Stale
+  `Class 1`/`Class 2` folders are pruned from the dataset, processed cache
+  and mixed set on open/sync/train, so they can never become model labels.
+- **🪪 License List — the gatekeeper whitelist.**  The `🪪 License List`
+  button (`#navLicenseList`, with a plate-count badge) sits next to
+  `⚙ Settings`; the same modal opens from the `+ Plates (N)` chip in
+  `#signSeqBar`.  Add, edit, remove, reorder (⭐ Set as Primary) and save
+  **one or more** 3-character plates; `sign_sequences[0]` is the primary and
+  is kept in lock-step with the `#signSeqBar` target.  Saving runs
+  `/classes/sync_ocr`, which rewrites the class list to the new union and (with
+  EMNIST Auto-Fill on) seeds 24 dark-on-white EMNIST samples for every newly
+  introduced character that has zero samples.
+- Declare the primary ordered target in `#signSeqBar` (e.g. `A ▸ 1 ▸ 2`).
 - **Reading Direction**: `Left to Right (L ➔ R)` or `Right to Left (R ➔ L)`.
   RTL reverses the three split boxes after the split; pixels are never
   mirrored.
@@ -60,8 +70,19 @@ belongs to.
   time.  EMNIST Auto-Fill supplies these glyphs directly.  Camera/upload
   samples must isolate the character for their class (Manual ROI/crop) — a
   whole 3-character sign is not split for training.
-- Preview first locates the sign ROI on the **native** 160×160 / 96×96
-  frame: Manual ROI when pinned; when Dark/Lum are tuned, an ink-cluster of
+- **Resolution auto-scaling.**  Camera captures may be larger than the model
+  input.  The export stamps three independent sides into
+  `model_settings.h` (`TM_CAPTURE_FRAME_SIDE`, `TM_PREPROCESS_FRAME_SIDE`,
+  `TM_MODEL_INPUT_SIDE` / `kNumCols`); with the default 160×160 capture the
+  P4 box-averages 160→96 before the sign split and 96→28 for each glyph
+  canvas.  The desktop live preview applies the same integer box average to
+  the 160×160 serial frame, so host and MCU see the same pixels.  The
+  compact **< 150 KB INT8** backbone and its 320 KB arena fit in fast
+  internal SRAM (PSRAM fallback only if allocation fails).
+- Preview first locates the sign ROI on the **preprocessed** frame (96×96,
+  box-averaged from a 160×160 device capture exactly like the MCU; an
+  upload/synth image keeps its own size): Manual ROI when pinned; when
+  Dark/Lum are tuned, an ink-cluster of
   the three interior character blobs (anything within 6 % of the frame edge
   and oversized/tiny components dropped); otherwise the bright inner plate.
   The ROI is the cluster union plus one uniform 10 % pad (tight and
@@ -87,8 +108,14 @@ belongs to.
   center-cropped to 1:1 on ingest.  The Edit modal is centred with 1:1
   Original/Processed stages.
 - Inference splits the sign into three boxes, runs the same 28×28 glyph
-  classifier three times, and requires **all three** slots to match the
-  target and clear the confidence floor before returning `YES`.
+  classifier three times, and requires **all three** slots to match **one**
+  allowed plate and clear the confidence floor before returning `YES`.
+  Preview compares the reading against every plate in `sign_sequences` and
+  names the winner (`🟢 YES — MATCH · Plate #2 (B18)`); a near miss reports
+  the closest plate, and a reading that is no whitelisted plate is `NO`.
+  The `🧪 Synth` pills draw the plate selected in the `Plate #k (…)`
+  dropdown next to them (the primary by default), so every allowed car can
+  be tested without a photo.
 - The MCU mirrors the host search in `sign_glyph.c`: binarise the frame,
   drop the 6 % border margin / huge frame components / specks, select the
   character band, pad it symmetrically to a `roi_box` (and compute
@@ -104,13 +131,20 @@ belongs to.
   the legacy `kSignBackgroundIsTheOnlyRejector` spelling is emitted too.
 - The OCR/sign glyph head is compact (`conv -> 1x1 Conv2D(16) -> Flatten ->
   Dense(128) -> softmax`), so the checked-in `TFLite_Sign/tm.tflite` is
-  ~125 KB and the device's first-choice tensor arena is 320 KB internal
-  SRAM.  `TFLite_Sign.ino` prints the model's operator codes before
+  **< 150 KB** (~125 KB) and the device's first-choice tensor arena is 320 KB
+  internal SRAM.  `TFLite_Sign.ino` prints the model's operator codes before
   allocation, names every resolver/arena/allocation failure as `FATAL:` on
   USB Serial, and retries once with an 8 MB PSRAM arena only if the compact
   arena cannot allocate.
 - Export route: `TFLite_Sign/TFLite_Sign.ino` (compile-time
-  `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`).
+  `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`).  The export also carries
+  the resolution sides (`TM_CAPTURE_FRAME_SIDE`,
+  `TM_PREPROCESS_FRAME_SIDE`, `TM_MODEL_INPUT_SIDE`) and the full whitelist:
+  `TM_SIGN_MULTI_TARGET_EXPORTED`, `kTargetSignCount`,
+  `kTargetSignSequences[kTargetSignCount][4]`,
+  `kTargetSignClassMatrix[kTargetSignCount][3]`, `kSignMatchMinProb`, plus
+  `TM_SIGN_USE_BACKGROUND_OOD` / `kSignBackgroundReplacesOod` /
+  `kBackgroundClassIndex`.
 
 Each sketch `#error`s if handed another project's export, so a wrong-folder
 export is a build error rather than a silent preprocessing mismatch.
@@ -126,9 +160,16 @@ export is a build error rather than a silent preprocessing mismatch.
 | `TFLite_Sign/` | 3-character sign reader | ESP32P4 Dev Module | `huge_app` (≈1.2 MB app) | `TM_SIGN_OCR_MODEL 1` |
 | `S3_UART_Receiver/` | ESP32-S3 UART receiver / junction controller | ESP32S3 Dev Module | — | 9-byte P4 packets |
 
-`image_provider.cpp/.h`, `main_functions.h` and `arduino_main.cpp` are
-byte-identical across the three P4 sketch folders; `TFLite_OCR/tools/sync_check.py`
-enforces it.
+`image_provider.cpp/.h`, `frame_resize.h`, `main_functions.h` and
+`arduino_main.cpp` are byte-identical across the three P4 sketch folders;
+`TFLite_OCR/tools/sync_check.py` enforces it.
+
+All three sketches read their resolution layers from the export:
+`g_frame_side = kCaptureFrameSide` is the **camera/serial** side (e.g. 160)
+and is deliberately independent of `kNumCols` (96 for the image project, 28
+for a glyph canvas).  `frame_resize.h` provides the exact integer
+box-average (`FrameResizeBoxAverageGray/Rgb`) used by the firmware and
+mirrored by `AItraining/tests/test_frame_resize_parity.py`.
 
 ---
 
@@ -202,7 +243,8 @@ The card's context bar shows only the control the active source needs.
 ### Image project — 96×96
 
 ```
-Camera RGB → demosaic + downsize to 96×96×3 (raw, no WB)
+Camera RGB at kCaptureFrameSide (e.g. 160×160)
+→ box-average down to IMG_SIZE (96×96×3, exact integer area average)
 → crop (auto search box, or center 60 % legacy)
 → bilinear resize (float32, PIL-style center mapping)
 → BT.601 luminance (30/59/11, round half up)
@@ -210,6 +252,10 @@ Camera RGB → demosaic + downsize to 96×96×3 (raw, no WB)
 → int8 (gray − 128)
 ```
 
+- The capture side and model side are independent: `g_frame_side` comes from
+  `TM_CAPTURE_FRAME_SIDE`, while `GetImage()` always emits `kNumCols`
+  (`IMG_SIZE`).  `160 → 96` is automatic; a 96×96 capture is an identity
+  resize.
 - Training data = `IMX219_Grayscale_Serial` (`BT.601` of raw demosaiced RGB,
   **no white balance**); the training cache is the canonical transform.
 - Auto search box: deterministic float32 cumsum blur + float64 geometry,
@@ -222,18 +268,26 @@ Camera RGB → demosaic + downsize to 96×96×3 (raw, no WB)
 ### OCR and sign projects — 28×28 glyphs
 
 ```
-ROI crop → integer-exact glyph canvas:
+Camera gray at kCaptureFrameSide (e.g. 160×160)
+→ box-average down to kPreprocessFrameSide (96×96)
+→ ROI crop → integer-exact glyph canvas:
 Otsu (integer) → vertical-projection split/segment → 28×28 canvas
 → int8 tensor
 ```
 
+- Both glyph sketches box-average the captured frame to
+  `kPreprocessFrameSide` before running `ocr_glyph.c` / `sign_glyph.c`, so a
+  160×160 camera behaves like the 96×96 frames the models/previews were
+  tuned on.  The camera serial stream itself still carries the full capture
+  resolution for data collection.
 - `sign_ocr` first splits the sign into three boxes with the same integer
   Otsu/projection rules, then runs the glyph model once per slot.
 - RTL reading order reverses the box list after the split — never the pixels.
-- The sign verdict is `YES` only when all three slots name their target
-  character, none is `_background`, each clears `kSignMatchMinProb`
-  (default 0.60), and each slot contains ink.  The device additionally
-  applies OOD layers 2/3 per slot.
+- The sign verdict is `YES` only when all three slots name **the same
+  allowed plate**'s characters, none is `_background`, each clears
+  `kSignMatchMinProb` (default 0.60), and each slot contains ink.  The device
+  additionally applies OOD layers 2/3 per slot.  Every row of
+  `kTargetSignClassMatrix` is checked, so any whitelisted plate can win.
 
 ---
 
@@ -273,21 +327,30 @@ Otsu (integer) → vertical-projection split/segment → 28×28 canvas
 0xAA 0x55 0x02 | 0x01 ACK_STOP / 0x02 RESUME_JUNCTION | XOR(0..3)
 ```
 
-**Sign verdict encoding** (`TFLite_Sign`):
+**Sign verdict encoding** (`TFLite_Sign`, multi-plate):
 
-- `label_id = 0xFF` means "read the flags, not a class".
 - `confidence` = the weakest slot's best raw score (0–255).
-- `flags` low nibble `0x02` = `sign_ready`; high nibble:
-  - `0x00` = MATCH (YES)
-  - `0xE0` = MISMATCH (NO)
-  - `0xF0` = NO SIGN (no ink)
+- `flags` low nibble `0x02` = `sign_ready`; high nibble is the verdict:
 
-The S3 receiver treats MATCH as a real sign and ignores MISMATCH / NO SIGN;
-the existing ACK_STOP → 3 s task → RESUME_JUNCTION cycle is unchanged.
+  | `flags` | Verdict | Byte 5 (`label_id`) |
+  |---|---|---|
+  | `0x02` | **MATCH** — all three slots matched one allowed plate | matched **plate index** `0 … kTargetSignCount-1` |
+  | `0xE2` | **MISMATCH** — a sign is present but no allowed plate matched | `0xFE` |
+  | `0xF2` | **NO SIGN** — frame has no ink | `0xFF` |
 
-**Data collection:** `0xAA 0x55 0xAA` + 96×96×3 RGB (27,648 bytes) for
-`IMX219_RGB_Serial`; `0xAA 0x55 0xAA` + 96×96 GRAY8 for
-`IMX219_Grayscale_Serial`.
+- On a MATCH the S3 resolves the index through its copy of
+  `kTargetSignSequences` (exported with the model) and can log/act on the
+  **specific car** (`label=1(B18)`); MISMATCH never triggers ACK_STOP.
+  Legacy P4 sketches that still send a class index continue to resolve
+  through `kCategoryLabels`.
+- The S3 keeps the ACK_STOP → 3 s task → RESUME_JUNCTION cycle unchanged;
+  a plate change resets the consecutive-frame counter.
+
+**Data collection:** `0xAA 0x55 0xAA` + `CAPTURE_SIDE²×3` RGB for
+`IMX219_RGB_Serial` (native capture side, WB applied per pixel) and
+`0xAA 0x55 0xAA` + `CAPTURE_SIDE²` GRAY8 for `IMX219_Grayscale_Serial`.
+The host's `SerialFrameReader` must use the same **Image Size** configured in
+`⚙ Settings` (e.g. 160×160).
 
 ---
 
@@ -306,19 +369,43 @@ The **5 files to copy next to the sketch** are the two `_model_data.*` files,
 `tm`, so a sign export produces `tm_model_data.*`; the C array symbol defaults
 to `g_tm_model_data`.
 
+Every export also stamps the resolution layers:
+
+```c
+#define TM_MODEL_INPUT_SIDE 28        // kNumCols (28 glyph, 96 image)
+#define TM_PREPROCESS_FRAME_SIDE 96   // working frame before the glyph/ROI crop
+#define TM_CAPTURE_FRAME_SIDE 160     // camera / serial side from ⚙ Settings
+constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;
+constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;
+constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;
+```
+
 `model_settings.h` for `sign_ocr` additionally contains:
 
 ```c
 #define TM_OCR_GLYPH_MODEL 0
 #define TM_SIGN_OCR_MODEL 1
 
-constexpr char kTargetSignSequence[] = "A1B";
-constexpr int kTargetSignClassIndices[3] = { ... };
+constexpr char kTargetSignSequence[] = "A12";       // primary, legacy-compatible
+constexpr int kTargetSignClassIndices[3] = { 0, 1, 2 };
+#define TM_SIGN_MULTI_TARGET_EXPORTED 1
+constexpr int kTargetSignCount = 2;
+constexpr char kTargetSignSequences[kTargetSignCount][4] = { "A12", "B18" };
+constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
+    { 0, 1, 2 },
+    { 3, 1, 4 },
+};
 constexpr int kSignReadingOrder = 0;      // 0 = LTR, 1 = RTL
 constexpr float kSignMatchMinProb = 0.600000f;
+#define TM_SIGN_USE_BACKGROUND_OOD 0
+constexpr bool kSignBackgroundReplacesOod = false;
+constexpr int kBackgroundClassIndex = -1;  // -1 = no _background class
 ```
 
 plus `kNumCols/kNumRows` (28), `kDarkThr/kLumThr`, and the four OOD gates.
+Copy the same `model_settings.h/.cpp` next to `S3_UART_Receiver.ino` as well
+if the S3 should name plates from the UART index; its checked-in copy is the
+current sign export.
 
 Every export also copies the run meta to `<workspace>/deployed.json`; Preview
 then keeps validating the exported model rather than a later training run.
@@ -376,6 +463,7 @@ commit inside them first, then bump the root pointer.
 ```bash
 # Host/device parity and integration
 python3 AItraining/tests/test_sign_glyph_parity.py
+python3 AItraining/tests/test_frame_resize_parity.py
 python3 TFLite_OCR/tools/wiring_check.py --sign
 python3 TFLite_OCR/tools/sync_check.py
 python3 TFLite_OCR/tools/ino_build_check.py --config <arduino-cli.yaml>
@@ -383,6 +471,7 @@ python3 TFLite_OCR/tools/ino_build_check.py --config <arduino-cli.yaml>
 # App regressions (headless Chrome + backend HTTP)
 cd AItraining
 .venv/bin/python tests/test_sign_ocr_spa.py
+.venv/bin/python tests/test_multi_plate.py
 .venv/bin/python tests/test_sign_sequence_autofill.py
 .venv/bin/python tests/test_sign_synth.py
 .venv/bin/python tests/test_emnist_seeder.py
