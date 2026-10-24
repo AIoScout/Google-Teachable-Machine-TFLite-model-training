@@ -493,11 +493,15 @@ static void normalise_stretch(const uint8_t *src, int stride, int w, int h,
   }
 }
 
-/* Integer round-half-up division, positive and negative numerator.
- * Python: _round_half_up(num, den) — the same two branches. */
+/* Integer round-half-up on the real line: floor(num/den + 0.5).
+ * Python: _round_half_up(num, den) — Python's floor division makes
+ * (2*num + den) // (2*den) correct for negatives too; C division truncates
+ * toward zero, so negative quotients need an explicit floor. */
 static int round_half_up_i64(int64_t num, int64_t den) {
-  if (num >= 0) return (int)((2 * num + den) / (2 * den));
-  return (int)(-((-2 * num + den) / (2 * den)));
+  const int64_t a = 2 * num + den;
+  const int64_t b = 2 * den;
+  if (a >= 0) return (int)(a / b);
+  return (int)(-(((-a) + b - 1) / b));
 }
 
 /* Python ocr_preprocess._narrow_stroke_radius: how many pixels to widen a
@@ -685,7 +689,140 @@ static void glyph_zero(uint8_t *glyph_out, int out_size) {
   }
 }
 
-static bool preprocess_common(const uint8_t *gray, int w, int h, int out_size,
+/* Flood-fill one 8-connected ink component.  `visited` must be zero at the
+ * seed; every pixel of the component is set to `visit_value`.  Returns the
+ * seed index (raster-first pixel), which identifies the component. */
+static int32_t flood_component(uint8_t *ink, int w, int h, int sx, int sy,
+                               SignScratch *s, uint8_t visit_value,
+                               int *x1_out, int *y1_out,
+                               int *x2_out, int *y2_out, int *area_out) {
+  const size_t start = (size_t)sy * (size_t)w + (size_t)sx;
+  int top = 0;
+  int x1 = sx, y1 = sy, x2 = sx + 1, y2 = sy + 1, area = 0;
+  s->visited[start] = visit_value;
+  s->stack[top++] = (int32_t)start;
+  while (top > 0) {
+    const int32_t idx = s->stack[--top];
+    const int cy = (int)(idx / w);
+    const int cx = (int)(idx % w);
+    if (cx < x1) x1 = cx;
+    if (cx + 1 > x2) x2 = cx + 1;
+    if (cy < y1) y1 = cy;
+    if (cy + 1 > y2) y2 = cy + 1;
+    area++;
+    for (int dy = -1; dy <= 1; dy++) {
+      const int ny = cy + dy;
+      if (ny < 0 || ny >= h) continue;
+      for (int dx = -1; dx <= 1; dx++) {
+        if (dx == 0 && dy == 0) continue;
+        const int nx = cx + dx;
+        if (nx < 0 || nx >= w) continue;
+        const size_t nidx = (size_t)ny * (size_t)w + (size_t)nx;
+        if (!ink[nidx] || s->visited[nidx]) continue;
+        s->visited[nidx] = visit_value;
+        s->stack[top++] = (int32_t)nidx;
+      }
+    }
+  }
+  if (x1_out) *x1_out = x1;
+  if (y1_out) *y1_out = y1;
+  if (x2_out) *x2_out = x2;
+  if (y2_out) *y2_out = y2;
+  if (area_out) *area_out = area;
+  return (int32_t)start;
+}
+
+/* Zero a component already marked visited==1, and set its gray pixels to the
+ * background so a removed speck cannot bias the intensity centring either. */
+static void clear_component(uint8_t *ink, uint8_t *gray, int w, int h,
+                            int32_t seed, SignScratch *s, uint8_t bg) {
+  if (!ink[seed]) return;
+  int top = 0;
+  s->visited[seed] = 3;
+  ink[seed] = 0;
+  gray[seed] = bg;
+  s->stack[top++] = seed;
+  while (top > 0) {
+    const int32_t idx = s->stack[--top];
+    const int cy = (int)(idx / w);
+    const int cx = (int)(idx % w);
+    for (int dy = -1; dy <= 1; dy++) {
+      const int ny = cy + dy;
+      if (ny < 0 || ny >= h) continue;
+      for (int dx = -1; dx <= 1; dx++) {
+        if (dx == 0 && dy == 0) continue;
+        const int nx = cx + dx;
+        if (nx < 0 || nx >= w) continue;
+        const size_t nidx = (size_t)ny * (size_t)w + (size_t)nx;
+        if (!ink[nidx] || s->visited[nidx] != 1) continue;
+        s->visited[nidx] = 3;
+        ink[nidx] = 0;
+        gray[nidx] = bg;
+        s->stack[top++] = (int32_t)nidx;
+      }
+    }
+  }
+}
+
+/* Remove small disconnected specks touching the crop boundary.  Bit-for-bit
+ * mirror of ocr_preprocess.strip_border_specks():
+ *   dominant = largest 8-connected component;
+ *   keep any other component larger than 20 % of it, not touching the crop
+ *   boundary, or overlapping the dominant bbox in BOTH axes (a detached
+ *   fragment of a broken '1' shares the stem's columns);
+ *   drop the rest (the stray foot of a neighbouring glyph clipped by a
+ *   Manual ROI).  The gray pixels of dropped specks become background so
+ *   they cannot shift NORM_CANON's intensity centring. */
+static void strip_border_specks_c(uint8_t *ink, uint8_t *gray, int w, int h,
+                                  SignScratch *s, uint8_t bg) {
+  if (!ink || !gray || !s || !s->visited || !s->stack || w <= 0 || h <= 0) {
+    return;
+  }
+  const size_t frame = (size_t)w * (size_t)h;
+  memset(s->visited, 0, frame);
+
+  int32_t dom_seed = -1;
+  int dom_area = -1;
+  int dx1 = 0, dy1 = 0, dx2 = 0, dy2 = 0;
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      const size_t start = (size_t)y * (size_t)w + (size_t)x;
+      if (!ink[start] || s->visited[start]) continue;
+      int x1, y1, x2, y2, area;
+      flood_component(ink, w, h, x, y, s, 1, &x1, &y1, &x2, &y2, &area);
+      if (area > dom_area) {
+        dom_area = area;
+        dom_seed = (int32_t)start;
+        dx1 = x1; dy1 = y1; dx2 = x2; dy2 = y2;
+      }
+    }
+  }
+  if (dom_seed < 0 || dom_area <= 0) return;
+
+  memset(s->visited, 0, frame);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      const size_t start = (size_t)y * (size_t)w + (size_t)x;
+      if (!ink[start] || s->visited[start]) continue;
+      int x1, y1, x2, y2, area;
+      const int32_t seed =
+          flood_component(ink, w, h, x, y, s, 1, &x1, &y1, &x2, &y2, &area);
+      if (seed == dom_seed) continue;
+      int keep = 1;
+      if (area * 100 <= 20 * dom_area) {
+        const int touches = (x1 == 0 || y1 == 0 || x2 == w || y2 == h);
+        if (touches) {
+          const int x_overlap = !(x2 <= dx1 || x1 >= dx2);
+          const int y_overlap = !(y2 <= dy1 || y1 >= dy2);
+          if (!(x_overlap && y_overlap)) keep = 0;
+        }
+      }
+      if (!keep) clear_component(ink, gray, w, h, seed, s, bg);
+    }
+  }
+}
+
+static bool preprocess_common(uint8_t *gray, int w, int h, int out_size,
                               SignPolarity polarity, bool apply_segmentation,
                               int min_run, int thresh, int dark_thr,
                               SignConvention convention, SignScratch *s,
@@ -716,6 +853,10 @@ static bool preprocess_common(const uint8_t *gray, int w, int h, int out_size,
 
   sign_binarize_ink(gray, n, t, polarity, s->ink);
   apply_dark_floor(gray, n, dark_thr, s->ink);
+  /* Single-glyph and per-slot crops: drop a neighbouring glyph's clipped
+   * corner speck before the bbox/metrics see it. */
+  strip_border_specks_c(s->ink, gray, w, h, s,
+                        (polarity == SIGN_INK_DARK) ? 255 : 0);
 
   bool any = false;
   for (size_t i = 0; i < n; i++) {
