@@ -122,10 +122,15 @@ belongs to.
   is the only OOD gate that fired — a correct, merely uncertain reading is
   not a rejection.  Layer 1 (`sign_pct`) is **disarmed on the 3-slot path**
   (it is a diagnostic there); `max_prob` still rejects, and the Preview
-  banner names the exact gate.  The floor is a runtime value: the exported
-  `kSignMatchMinProb` (default **0.40**) is the boot default, and Serial
-  `set ood spmin spmax mpmin ermax` sets it to `mpmin` on both the P4 and
-  the host preview.
+  banner names the exact gate.  **`OOD MAX PROB` in Input Settings is the
+  single probability threshold** (default **0.40**): it gates `max_prob` and
+  is also the per-slot match floor shown in the banner (`each at N% or
+  better`).  There is no separate hidden floor.  Export stamps the same
+  value into both `kOodMaxProbMin` and `kSignMatchMinProb`; Serial
+  `set ood spmin spmax mpmin ermax` updates both at runtime.  The OOD
+  entropy default is **0.85**, and stale browser caches of the old
+  0.60 / 0.70 defaults migrate once to 0.40 / 0.85 (custom values are
+  preserved).
   The `🧪 Synth` pills draw the plate selected in the `Plate #k (…)`
   dropdown next to them (the primary by default), so every allowed car can
   be tested without a photo.
@@ -298,11 +303,11 @@ Otsu (integer) → vertical-projection split/segment → 28×28 canvas
   Otsu/projection rules, then runs the glyph model once per slot.
 - RTL reading order reverses the box list after the split — never the pixels.
 - The sign verdict is `YES` only when all three slots name **the same
-  allowed plate**'s characters, none is `_background`, each clears
-  `kSignMatchMinProb` (default 0.40; `set ood ... <mpmin>` adjusts it at
-  runtime), and each slot contains ink.  The device
-  additionally applies OOD layers 2/3 per slot.  Every row of
-  `kTargetSignClassMatrix` is checked, so any whitelisted plate can win.
+  allowed plate**'s characters, none is `_background`, each clears the
+  single `OOD MAX PROB` threshold (default 0.40; `kSignMatchMinProb` and
+  `kOodMaxProbMin` are exported from that one value), and each slot contains
+  ink.  The device additionally applies OOD layers 2/3 per slot.  Every row
+  of `kTargetSignClassMatrix` is checked, so any whitelisted plate can win.
 
 ---
 
@@ -411,7 +416,7 @@ constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
     { 3, 1, 4 },
 };
 constexpr int kSignReadingOrder = 0;      // 0 = LTR, 1 = RTL
-constexpr float kSignMatchMinProb = 0.400000f;  // boot default; set ood adjusts
+constexpr float kSignMatchMinProb = 0.400000f;  // == kOodMaxProbMin
 #define TM_SIGN_USE_BACKGROUND_OOD 0
 constexpr bool kSignBackgroundReplacesOod = false;
 constexpr int kBackgroundClassIndex = -1;  // -1 = no _background class

@@ -89,7 +89,7 @@ constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
     { 3, 1, 4 },
 };
 constexpr int kSignReadingOrder = 0;                   // 0 = LTR, 1 = RTL
-constexpr float kSignMatchMinProb = 0.400000f;   // boot default; set ood adjusts
+constexpr float kSignMatchMinProb = 0.400000f;   // == kOodMaxProbMin
 ```
 
 `g_frame_side` is initialized from `kCaptureFrameSide` (the macro), and
@@ -138,12 +138,13 @@ A slot matches when **all** of the following hold, mirroring
 4. there is an allowed plate whose row in `kTargetSignClassMatrix` names
    this slot's winning class index (every row is tested; all three slots
    must agree on the SAME row);
-5. `prob >= s_sign_match_min_prob` — the **runtime** floor.  It starts at
-   the exported `kSignMatchMinProb` (0.40) and `set ood spmin spmax mpmin
-   ermax` updates it to `mpmin` (both the text command and the binary
-   `kCmdSetOodThresholds`), so lowering `mpmin` actually reaches the slot
-   rule instead of only changing Layers 2/3.  `get ood` prints the
-   effective values.  `prob` is the host's raw ratio
+5. `prob >= s_sign_match_min_prob` — the **runtime** floor.  It is the same
+   single threshold as OOD MAX PROB: the export writes one value into both
+   `kOodMaxProbMin` and `kSignMatchMinProb` (default 0.40), and
+   `set ood spmin spmax mpmin ermax` updates it to `mpmin` (both the text
+   command and the binary `kCmdSetOodThresholds`).  There is no separate
+   hidden floor, and values below 0.40 (e.g. 0.25) are honoured.  `get ood`
+   prints the effective values.  `prob` is the host's raw ratio
    `best_raw / total_raw` over `int8 + 128` values — **not** a dequantised
    softmax probability.
 
@@ -151,7 +152,7 @@ A slot matches when **all** of the following hold, mirroring
 `ImageProviderSetOodThresholds(kOodSignMinPct, kOodSignMaxPct,
 kOodMaxProbMin, kOodEntropyRatioMax)` and
 `ImageProviderSetMaskThresholds(kBgDarkThresh, kBgLumThresh)`.  Without those
-calls the provider keeps `image_provider.h`'s 0.60 / 0.70 compile-time
+calls the provider keeps `image_provider.h`'s 0.40 / 0.85 compile-time
 defaults and ignores `model_settings.h` entirely.
 
 The frame verdict is:
