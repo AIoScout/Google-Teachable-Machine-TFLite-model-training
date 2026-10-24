@@ -82,18 +82,17 @@ belongs to.
   the 160×160 serial frame, so host and MCU see the same pixels.  The
   compact **< 150 KB INT8** backbone and its 320 KB arena fit in fast
   internal SRAM (PSRAM fallback only if allocation fails).
-- Preview first locates the sign ROI on the **preprocessed** frame (96×96,
-  box-averaged from a 160×160 device capture exactly like the MCU; an
-  upload/synth image keeps its own size): Manual ROI when pinned; when
-  Dark/Lum are tuned, an ink-cluster of the three interior character blobs
-  (frame-scale lines and corner debris are dropped, but a character near the
-  plate/frame edge is kept); otherwise the bright inner plate.
-  The ROI is the cluster union plus one uniform 10 % pad (tight and
-  symmetric), clamped to the white plate interior so the dark surround /
-  holder border cannot enter the crop.  The split runs on that exact ROI —
-  there is **no second border-cleaning pass**, so `'A'`, both strokes of a
-  broken `'1'`, and `'2'` survive.  The response carries `roi_box` plus a
-  real `sign_pct`.
+- Preview runs the **same slicer as the MCU** on the preprocessed frame
+  (96×96, box-averaged from a 160×160 device capture; an upload/synth image
+  keeps its own size): `preprocess_sign_sequence(..., find_roi=True)` with
+  the same `(pinned_thresh, dark_thr)` derived from Dark/Lum.  There is no
+  host-only bright-plate/ink-cluster pre-crop: the interior component/band
+  search drops the outer frame/clutter, keeps a character near the plate
+  edge, strips a disconnected corner speck, and splits the band.  A pinned
+  Manual ROI pre-crops first and the same search runs inside it.  The result
+  is bit-identical to `sign_glyph.c` on the same frame (roi_box + all three
+  28×28 glyphs), and the model is fed the device tensor `(int)pixel − 128`.
+  The response carries `roi_box` plus a real `sign_pct`.
 - **ROI OFF** shows the full frame (thresholded by default, raw with Orig)
   and draws the rectangle; **ROI ON** shows the **exact pixel slice inside
   that same rectangle** (same threshold, no re-clean) and hides the

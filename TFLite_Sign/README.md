@@ -164,6 +164,12 @@ canonical centre-of-mass shift uses true round-half-up (floor(x+0.5), not
 half-away-from-zero), matching `ocr_preprocess.py` bit-for-bit — a narrow
 `'1'` lands centred at 3–4 px.
 
+`mode infergray` streams the raw capture-side GRAY8 frame (e.g. 160×160).
+AItraining's live worker box-averages it 160→96 with the same integer
+`_resize_square_box_average_u8` the device uses in `sign_feed_slots()`, so
+the 96×96 buffer the desktop Preview slices is exactly the device's slicer
+input.
+
 The frame verdict is:
 
 | Verdict | Condition |
