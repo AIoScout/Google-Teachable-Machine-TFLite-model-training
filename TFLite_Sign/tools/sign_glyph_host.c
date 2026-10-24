@@ -26,6 +26,11 @@
  *
  * The harness also cross-checks sign_scratch_bytes against sign_scratch_init,
  * so a mis-sized device scratch buffer fails here rather than on the ESP32.
+ *
+ * The parity corpus includes a white plate whose 'A' sits inside the old 6 %
+ * frame margin and whose '1' is broken into two strokes.  roi_box and every
+ * 28x28 glyph are compared with Python, so an edge-glyph erasure or a
+ * border-line bleed in sign_glyph.c fails here before it reaches the P4.
  */
 #include <stdio.h>
 #include <stdlib.h>

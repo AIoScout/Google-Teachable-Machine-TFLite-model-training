@@ -82,15 +82,19 @@ belongs to.
 - Preview first locates the sign ROI on the **preprocessed** frame (96×96,
   box-averaged from a 160×160 device capture exactly like the MCU; an
   upload/synth image keeps its own size): Manual ROI when pinned; when
-  Dark/Lum are tuned, an ink-cluster of
-  the three interior character blobs (anything within 6 % of the frame edge
-  and oversized/tiny components dropped); otherwise the bright inner plate.
+  Dark/Lum are tuned, an ink-cluster of the three interior character blobs
+  (frame-scale lines and corner debris are dropped, but a character near the
+  plate/frame edge is kept); otherwise the bright inner plate.
   The ROI is the cluster union plus one uniform 10 % pad (tight and
-  symmetric).  It crops and strips border-frame/noise ink, then splits the
-  three glyphs.  The response carries `roi_box` plus a real `sign_pct`.
+  symmetric), clamped to the white plate interior so the dark surround /
+  holder border cannot enter the crop.  The split runs on that exact ROI —
+  there is **no second border-cleaning pass**, so `'A'`, both strokes of a
+  broken `'1'`, and `'2'` survive.  The response carries `roi_box` plus a
+  real `sign_pct`.
 - **ROI OFF** shows the full frame (thresholded by default, raw with Orig)
-  and draws the rectangle; **ROI ON** zooms to the cropped ROI content and
-  hides the rectangle.  **Orig OFF (default)** is the Dark/Lum threshold
+  and draws the rectangle; **ROI ON** shows the **exact pixel slice inside
+  that same rectangle** (same threshold, no re-clean) and hides the
+  rectangle.  **Orig OFF (default)** is the Dark/Lum threshold
   view (ink black, everything else pure white); **Orig ON** is the original
   grayscale.  The Edit modal's Processed Preview is black-on-white cropped
   to the ROI, as are the three `.signmatch-slot` thumbnails; no slot strip
@@ -113,6 +117,11 @@ belongs to.
   Preview compares the reading against every plate in `sign_sequences` and
   names the winner (`🟢 YES — MATCH · Plate #2 (B18)`); a near miss reports
   the closest plate, and a reading that is no whitelisted plate is `NO`.
+  A slot whose top class **is** that plate's target character and whose
+  probability clears `kSignMatchMinProb` is accepted even when
+  `entropy_ratio` is the only OOD gate that fired — a correct, merely
+  uncertain reading is not a rejection.  `sign_pct` and `max_prob` still
+  reject unconditionally, and the Preview banner names the exact gate.
   The `🧪 Synth` pills draw the plate selected in the `Plate #k (…)`
   dropdown next to them (the primary by default), so every allowed car can
   be tested without a photo.

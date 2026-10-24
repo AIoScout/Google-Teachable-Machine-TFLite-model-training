@@ -819,6 +819,30 @@ typedef struct {
 
 static int iabs(int v) { return (v < 0) ? -v : v; }
 
+/* True only for frame-scale / outer-surround components.  Mirrors
+ * ocr_preprocess._is_outer_frame_debris bit-for-bit.
+ *
+ * A character may legitimately sit within a few pixels of the frame edge
+ * (a tight plate capture), so the old unconditional outer-margin drop is
+ * gone: it erased 'A' while leaving the plate.  Still removed: the plastic
+ * frame / holder border (thin in one axis, spanning >= 70 % of the other)
+ * and frame-thickness corner debris at the outer edge.  A thin '1' stroke
+ * (tall but < 70 % of the frame) and a detached bottom fragment survive. */
+static bool is_outer_frame_debris(int x, int y, int cw, int ch,
+                                  int w, int h, int margin) {
+  if (w <= 0 || h <= 0) return false;
+  int thin_w = (w * 6 + 50) / 100;
+  if (thin_w < 4) thin_w = 4;
+  int thin_h = (h * 6 + 50) / 100;
+  if (thin_h < 4) thin_h = 4;
+  if (ch <= thin_h && cw * 100 >= 70 * w) return true;
+  if (cw <= thin_w && ch * 100 >= 70 * h) return true;
+  const int touches_outer = (x <= margin || y <= margin ||
+                             x + cw >= w - margin || y + ch >= h - margin);
+  if (touches_outer && cw <= thin_w && ch <= thin_h) return true;
+  return false;
+}
+
 /* Returns true and fills roi/pct when a band was found.  Ink outside the ROI
  * is zeroed so the projection split only sees the characters. */
 static bool interior_roi_c(uint8_t *ink, int w, int h, SignScratch *s,
@@ -873,10 +897,7 @@ static bool interior_roi_c(uint8_t *ink, int w, int h, SignScratch *s,
       const int cw = x2 - x1;
       const int ch = y2 - y1;
       if (area < min_area) continue;
-      if (x1 <= margin || y1 <= margin || x2 >= w - margin ||
-          y2 >= h - margin) {
-        continue;
-      }
+      if (is_outer_frame_debris(x1, y1, cw, ch, w, h, margin)) continue;
       if (cw * 100 > 85 * w || ch * 100 > 60 * h) continue;
       if (area * 100 > 40 * (int)frame) continue;
       cand[ncand].box.x1 = x1;

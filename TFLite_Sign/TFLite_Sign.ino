@@ -1289,7 +1289,9 @@ static void pick_label_and_confidence(TfLiteTensor *output, uint8_t *label_id,
 // (Layer 2), and (3) normalised entropy of the distribution (Layer 3).  Any
 // rule that fires → OOD = false → caller should report "No Sign".
 static bool ood_is_in_distribution(float sign_pct, TfLiteTensor *output,
-                                   float *out_max_prob, float *out_entropy_ratio) {
+                                   float *out_max_prob, float *out_entropy_ratio,
+                                   bool *out_entropy_only = nullptr) {
+  if (out_entropy_only) *out_entropy_only = false;
 #if OOD_ENABLE != 1
   if (out_max_prob)     *out_max_prob = 1.0f;
   if (out_entropy_ratio) *out_entropy_ratio = 0.0f;
@@ -1357,7 +1359,10 @@ static bool ood_is_in_distribution(float sign_pct, TfLiteTensor *output,
   if (ent_ratio > 1.0f) ent_ratio = 1.0f;
   if (out_entropy_ratio) *out_entropy_ratio = ent_ratio;
 
-  if (entropy_max > 0.0f && ent_ratio > entropy_max) return false;
+  if (entropy_max > 0.0f && ent_ratio > entropy_max) {
+    if (out_entropy_only) *out_entropy_only = true;
+    return false;
+  }
   return true;
 #endif  // OOD_ENABLE == 1
 }
@@ -1854,16 +1859,24 @@ static void inference_task(void *arg) {
       // three gates and the model's background class decides, otherwise
       // Layers 1-3 compose with the match rule.
       float max_prob = 0.0f, entropy_ratio = 1.0f;
+      bool entropy_only = false;
       const bool in_distribution =
           ood_is_in_distribution(s_sign_info.sign_pct, output, &max_prob,
-                                 &entropy_ratio);
+                                 &entropy_ratio, &entropy_only);
+      slot_entropy_only[slot] = entropy_only;
       const bool is_background = is_background_id(slot_label[slot]);
 
       // A slot is READABLE independent of which plate we compare it to:
       // ink, a real class, OOD in-distribution and the confidence floor.
       // The plate loop below decides which target character it must equal.
+      // An entropy-only rejection is NOT decisive: if this slot's top class
+      // turns out to be an allowed plate's target character (and prob
+      // cleared the floor), the plate loop accepts it.  A correct reading
+      // used to be reported as NO because a multi-plate class set pushes
+      // entropy_ratio above the 0.70 gate.  sign_pct / max_prob still
+      // reject unconditionally.
       slot_accept[slot] = s_slot_info[slot].ok &&
-                          in_distribution &&
+                          (in_distribution || entropy_only) &&
                           !is_background &&
                           prob >= kSignMatchMinProb;
       (void)max_prob;
