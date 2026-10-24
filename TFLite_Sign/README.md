@@ -69,14 +69,36 @@ For a `sign_ocr` project, `model_settings.h` carries:
 #define kDarkThr 0          // the editor's Dark Thr, already nudged host-side
 #define kLumThr 100
 
+#define TM_MODEL_INPUT_SIDE 28
+#define TM_PREPROCESS_FRAME_SIDE 96
+#define TM_CAPTURE_FRAME_SIDE 160
+
 constexpr int kCategoryCount = N;
 extern const char* kCategoryLabels[kCategoryCount];
 
-constexpr char kTargetSignSequence[] = "A1B";          // SIGN_SEQUENCE_LEN chars
-constexpr int kTargetSignClassIndices[3] = {1, 3, 2};  // indices into the labels
+// Primary target (legacy-compatible; always sign_sequences[0]).
+constexpr char kTargetSignSequence[] = "A12";          // SIGN_SEQUENCE_LEN chars
+constexpr int kTargetSignClassIndices[3] = {0, 1, 2};  // indices into the labels
+
+// Gatekeeper whitelist: one row per allowed plate.
+#define TM_SIGN_MULTI_TARGET_EXPORTED 1
+constexpr int kTargetSignCount = 2;
+constexpr char kTargetSignSequences[kTargetSignCount][4] = { "A12", "B18" };
+constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
+    { 0, 1, 2 },
+    { 3, 1, 4 },
+};
 constexpr int kSignReadingOrder = 0;                   // 0 = LTR, 1 = RTL
 constexpr float kSignMatchMinProb = 0.600000f;
 ```
+
+`g_frame_side` is initialized from `kCaptureFrameSide` (the macro), and
+`g_preprocess_side` from `kPreprocessFrameSide`; older exports without the
+macros fall back to 96/96.  The capture frame is box-averaged to
+`g_preprocess_side` before the split (`frame_resize.h`), so a 160×160 camera
+works with the 96×96-tuned front-end.  A factory-built export from before the
+whitelist has `TM_SIGN_MULTI_TARGET_EXPORTED 0` and the sketch uses
+`kTargetSignSequence` / `kTargetSignClassIndices` as a one-plate table.
 
 There is **no per-slot mirroring**.  `kSignReadingOrder = 1` reverses the three
 crops after the split, because the leftmost glyph is the LAST character of an
@@ -108,7 +130,9 @@ A slot matches when **all** of the following hold, mirroring
 2. `ood_is_in_distribution(...)` — the raw-int8 OOD layers 2/3 agree (Layer 1
    is disarmed on this path, exactly as in the OCR sketch);
 3. the winning class is not `_background` (matched by **name**, not index);
-4. the winning class index equals `kTargetSignClassIndices[slot]`;
+4. there is an allowed plate whose row in `kTargetSignClassMatrix` names
+   this slot's winning class index (every row is tested; all three slots
+   must agree on the SAME row);
 5. `prob >= kSignMatchMinProb`, where `prob` is the host's raw ratio
    `best_raw / total_raw` over `int8 + 128` values — **not** a dequantised
    softmax probability.
@@ -117,9 +141,13 @@ The frame verdict is:
 
 | Verdict | Condition |
 |---|---|
-| `MATCH` (YES) | all three slots matched |
-| `MISMATCH` (NO) | ink is present, at least one slot failed |
+| `MATCH` (YES) | all three slots matched **one allowed plate** (`kTargetSignSequences`) |
+| `MISMATCH` (NO) | ink is present, but no allowed plate matched all three slots |
 | `NO SIGN` | the split found no ink anywhere in the frame |
+
+Every row of `kTargetSignClassMatrix` is checked; an exact 3-for-3 wins.
+When none is exact, the plate with the most hits supplies the diagnostic
+`WANT` characters, but the verdict is still NO.
 
 ---
 
@@ -131,24 +159,27 @@ XOR checksum over bytes 0–7.
 
 For a sign verdict:
 
-- `label_id = 0xFF` — "read the flags", not a class;
 - `confidence` = the weakest slot's best raw score (0..255);
-- `flags` low nibble `0x02` = `sign_ready`; high nibble is the verdict:
+- `flags` low nibble `0x02` = `sign_ready`; high nibble is the verdict;
+- **`label_id` says which plate matched**:
 
-| High nibble | Verdict |
-|---|---|
-| `0x00` | MATCH |
-| `0xE0` | MISMATCH |
-| `0xF0` | NO SIGN |
+| `flags` | Verdict | `label_id` |
+|---|---|---|
+| `0x02` | MATCH | matched plate index `0 .. kTargetSignCount-1` |
+| `0xE2` | MISMATCH | `0xFE` |
+| `0xF2` | NO SIGN | `0xFF` |
 
-`S3_UART_Receiver` treats a MATCH as a real sign (so the existing ACK_STOP
-logic keeps working) and ignores MISMATCH / NO SIGN.  That is deliberate
-backward compatibility: a receiver flashed before the sign work still runs.
+`S3_UART_Receiver` resolves the index through its copy of
+`kTargetSignSequences` (exported with the model), logs the plate
+(`label=1(B18)`), and treats only a MATCH as a real sign, so the existing
+ACK_STOP → tasks → RESUME_JUNCTION cycle keeps working.  MISMATCH / NO SIGN
+never trigger it.  A receiver flashed before this protocol still reads the
+flags; it just cannot name the plate.
 
 The on-device serial line is human-readable:
 
 ```
-SIGN: MATCH (YES)  [0] 'A'->A 0.98  [1] '1'->1 0.93  [2] 'B'->B 0.97
+SIGN: MATCH (YES) plate#2=B18  [0] 'B'->B 0.98  [1] '1'->1 0.93  [2] '8'->8 0.97
 SIGN: NO MATCH (NO)  [0] 'A'->6 0.41 (FAIL)  ...
 ```
 
@@ -234,6 +265,13 @@ allocation and no per-frame heap allocation.
 - **Slot canvases are quantised into the tensor immediately before each
   Invoke**, so only one 784-byte slot buffer exists in RAM.  Keeping three
   quantised copies would cost 2,352 B for no behavioural change.
-- **`label_id = 0xFF` and the flags high nibble are the verdict contract.**
-  The S3 receiver keys on them; changing one side alone breaks the junction
-  logic.
+- **`label_id` and the flags high nibble are the verdict contract.**  A
+  MATCH sends the matched plate index, MISMATCH sends `0xFE` and NO SIGN
+  sends `0xFF`; the S3 receiver keys on both bytes.  Changing one side alone
+  breaks the gatekeeper logic.
+- **Capture side, preprocessing side and model input are independent.**
+  `g_frame_side = kCaptureFrameSide` (e.g. 160), `g_preprocess_side =
+  kPreprocessFrameSide` (96), and each glyph is 28×28.  The frame is
+  box-averaged 160→96 before `sign_glyph.c` runs; never feed the raw capture
+  frame to the split.  `frame_resize.h` is the exact C mirror of the host
+  resize.

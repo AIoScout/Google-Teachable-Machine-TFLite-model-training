@@ -11,6 +11,17 @@ constexpr int kNumChannels = 1;
 
 constexpr int kMaxImageSize = kNumCols * kNumRows * kNumChannels;
 
+// ── Resolution layers (capture -> preprocess -> model) ───────────
+// The MCU may capture at a different side than the model input;
+// the sketches box-average the captured square frame down to the
+// preprocessing side before the glyph/ROI transform.
+#define TM_MODEL_INPUT_SIDE 28
+#define TM_PREPROCESS_FRAME_SIDE 96
+#define TM_CAPTURE_FRAME_SIDE 160
+constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;
+constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;
+constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;
+
 // TM_OCR_GLYPH_MODEL selects the device preprocessing branch:
 //   1 = 96x96 library gray -> integer glyph front-end -> 28x28
 //   0 = legacy 96x96 crop/resize/contrast-stretch sign pipeline

@@ -255,40 +255,41 @@ Two rules for the exporter, both already true of this export:
 
 ### 4.3 Feed the interpreter: gray → glyph → int8
 
-The sign path (line 1374) calls
-`GetImage(..., input->data.int8)` — crop → bilinear → BT.601 → contrast stretch
-→ int8, i.e. the *sign* pipeline. **The OCR model must not be fed that**: its
-input is a 28×28 glyph canvas, and its 96×96 source frame is the *raw* gray
-capture, not a crop.
+The sign path calls `GetImage(..., input->data.int8)` — crop → bilinear →
+BT.601 → contrast stretch → int8, i.e. the *sign* pipeline. **The OCR model
+must not be fed that**: its input is a 28×28 glyph canvas, and its source
+frame is the *raw* gray capture, not a crop.
 
-The device already exposes exactly the right buffer
+The device exposes exactly the right buffer
 (`TFLite/image_provider.cpp::CameraGetGrayImgSized()`): *"the LIBRARY's own
 BT.601 gray conversion — the exact source the IMX219_Grayscale_Serial
 data-collection stream uses for training. No crop, no contrast stretch."*
-That is byte-for-byte what the training PNGs contain, so the C front-end runs
-on the same bytes the Python did.
+That buffer is at the CAMERA CAPTURE side (160).  The glyph front-end runs at
+`g_preprocess_side` (96), so the sketch box-averages it first with
+`FrameResizeBoxAverageGray()` — the same integer resize the host preview uses.
 
 Sketch the OCR branch in the `tflm` task (replacing the `GetImage` call):
 
 ```cpp
 #include "ocr_glyph.h"          // from TFLite_OCR/
 // ...
-    static uint8_t  s_ocr_scratch[OCR_SCRATCH_BYTES_96];
+    static uint8_t  pre_gray[g_preprocess_side * g_preprocess_side];
     static OcrScratch s_scratch;
     static uint8_t  glyph[OCR_GLYPH_SIZE * OCR_GLYPH_SIZE];
-    static bool     s_scratch_ok = false;
-    if (!s_scratch_ok) {
-      s_scratch_ok = ocr_scratch_init(&s_scratch, s_ocr_scratch,
-                                      sizeof(s_ocr_scratch), g_frame_side,
-                                      g_frame_side, OCR_GLYPH_SIZE);
-      if (!s_scratch_ok) { /* log + halt: scratch sizing is a build-time fact */ }
+    // ... ocr_scratch_init(..., g_preprocess_side, g_preprocess_side, ...)
+
+    const uint8_t *gray = CameraGetGrayImgSized();   // raw library gray, 160x160
+    if (gray == nullptr) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+    const uint8_t *frame = gray;
+    int frame_side = g_frame_side;
+    if (g_frame_side != g_preprocess_side) {
+      FrameResizeBoxAverageGray(gray, g_frame_side, pre_gray, g_preprocess_side);
+      frame = pre_gray;
+      frame_side = g_preprocess_side;
     }
 
-    const uint8_t *gray = CameraGetGrayImgSized();   // raw library gray, 96x96
-    if (gray == nullptr) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
-
     OcrGlyphInfo ginfo;
-    ocr_preprocess_gray(gray, g_frame_side, g_frame_side, OCR_GLYPH_SIZE,
+    ocr_preprocess_gray(frame, frame_side, frame_side, OCR_GLYPH_SIZE,
                         OCR_INK_DARK,      /* captures: dark ink on bright page */
                         /*apply_segmentation=*/true,
                         OCR_MIN_GLYPH_RUN, /* = 2, matches Python MIN_GLYPH_RUN  */
@@ -299,16 +300,17 @@ Sketch the OCR branch in the `tflm` task (replacing the `GetImage` call):
     ocr_glyph_to_int8(glyph, sizeof(glyph), input->data.int8);   // g - 128
 ```
 
-Sizing (`ocr_scratch_bytes(g_frame_side, g_frame_side, OCR_GLYPH_SIZE)`, so it
-follows `g_frame_side` instead of a magic number):
+Sizing (`ocr_scratch_bytes(g_preprocess_side, g_preprocess_side,
+OCR_GLYPH_SIZE)`, so the scratch follows the size the front-end actually
+reads):
 
 ```c
 static constexpr size_t OCR_SCRATCH_BYTES_96  = 20392;  /* 96x96  -> 28 */
 static constexpr size_t OCR_SCRATCH_BYTES_128 = 34856;  /* 128x128 -> 28 */
 ```
 
-`CameraGetGrayImgSized()` is declared at `image_provider.h:191`. Call it
-once per frame and pass the same pointer to both the OCR branch and the
+`CameraGetGrayImgSized()` returns the NATIVE capture buffer.  Call it once
+per frame and pass the same pointer to both the OCR branch and the
 `kInferGray` capture stream — they want the same buffer, and a second call
 would return the same pointer anyway.
 

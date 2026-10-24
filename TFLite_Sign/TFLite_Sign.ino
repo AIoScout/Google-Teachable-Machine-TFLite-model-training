@@ -27,16 +27,17 @@ limitations under the License.
 // is the legacy 96x96 sign pipeline.  This folder is the `sign_ocr`
 // export target, and its model_settings.h carries the target sequence.
 // ═══════════════════════════════════════════════════════════════════════
-// USER CONFIG — edit these two values only (edit HERE, in this file)
+// RESOLUTION LAYERS — stamped into model_settings.h by Export Model
 //
-//   g_frame_side
-//     Capture / serial-stream resolution (8-512).  The camera libraries
-//     follow it at runtime (unified API, applied in setup()).  Same
-//     variable name as the camera-library example sketches.  The MODEL
-//     INPUT is one 28x28 glyph canvas (sign_glyph.h SIGN_GLYPH_SIZE),
-//     built from each of the three slots the split finds; to change it,
-//     re-export the model from AItraining at that img_size and update
-//     sign_glyph.h.
+//   TM_CAPTURE_FRAME_SIDE      camera / serial-stream side    (e.g. 160)
+//   TM_PREPROCESS_FRAME_SIDE   glyph front-end input side     (e.g. 96)
+//   TM_MODEL_INPUT_SIDE        one glyph canvas side          (28)
+//
+// They are deliberately independent.  The camera captures at 160×160; the
+// signature front-end runs on the 96×96 box-averaged frame (the same
+// resolution AItraining previews and the training captures use); each slot
+// is then resampled to the 28×28 model canvas.  g_frame_side is the CAPTURE
+// side only — never assume it equals the model input.
 //
 //   g_flip_180
 //     The camera is mounted upside down on the board; the library rotates
@@ -44,20 +45,30 @@ limitations under the License.
 //     Set to false only if your mount differs.
 //
 //   (constexpr here, unlike the examples, because this sketch sizes
-//    compile-time arrays from g_frame_side.)
+//    compile-time arrays from g_frame_side / g_preprocess_side.)
 // ═══════════════════════════════════════════════════════════════════════
-constexpr int  g_frame_side = 96;
-constexpr bool g_flip_180   = true;
-
 // #include <TensorFlowLite.h>
 
 #include "main_functions.h"
-#include "image_provider.h"
-#include "model_settings.h"
+#include "model_settings.h"   // before USER CONFIG: it carries the resolution sides
+#include "image_provider.h"   // includes frame_resize.h (box-average helper)
 // Include the exported model data header.
 // Rename this include to match your exported model's header file name,
 // e.g. "Square_model_data.h" or "MyModel_model_data.h".
 #include "tm_model_data.h"
+
+// Older exports predate the resolution macros: keep their 96×96 capture
+// behaviour, where capture and preprocessing were the same frame.
+#ifndef TM_CAPTURE_FRAME_SIDE
+#define TM_CAPTURE_FRAME_SIDE 96
+#endif
+#ifndef TM_PREPROCESS_FRAME_SIDE
+#define TM_PREPROCESS_FRAME_SIDE 96
+#endif
+
+constexpr int  g_frame_side      = TM_CAPTURE_FRAME_SIDE;
+constexpr int  g_preprocess_side = TM_PREPROCESS_FRAME_SIDE;
+constexpr bool g_flip_180        = true;
 
 
 #include "tensorflow/lite/micro/micro_log.h"
@@ -155,19 +166,24 @@ static_assert(kTargetSignCount >= 1 && kTargetSignCount <= 16,
 #define SIGN_PLATE_CLASS(p, s) ((void)(p), kTargetSignClassIndices[(s)])
 #define SIGN_PLATE_TEXT(p) ((void)(p), kTargetSignSequence)
 #endif
-// Same class of tripwire for the USER CONFIG frame size.  The front-end
+// Same class of tripwire for the PREPROCESSING frame size.  The front-end
 // refuses frames outside sign_glyph.h's envelope (1 <= w <= SIGN_MAX_W,
-// w*h <= SIGN_MAX_PIXELS) and our caller passes w == h == g_frame_side, so the
-// whole envelope collapses to this one square-frame test.  Catching it here
-// beats catching it at runtime: an out-of-envelope frame is a legal USER
-// CONFIG value, the refuser is inside the library, and the observable symptom
-// would be three silently all-zero glyphs forever (they ARE zeroed, per the
-// header contract — they just never get any ink in them).
-static_assert(g_frame_side >= 1 && g_frame_side <= SIGN_MAX_W &&
-                  (int64_t)g_frame_side * g_frame_side <= SIGN_MAX_PIXELS,
-              "g_frame_side is outside sign_glyph.h's frame envelope "
+// w*h <= SIGN_MAX_PIXELS) and our caller passes w == h == g_preprocess_side,
+// so the whole envelope collapses to this one square-frame test.  The camera
+// capture side may be larger (160) — it is box-averaged down first, so it is
+// deliberately NOT the value tested here.
+static_assert(g_preprocess_side >= 1 && g_preprocess_side <= SIGN_MAX_W &&
+                  (int64_t)g_preprocess_side * g_preprocess_side <= SIGN_MAX_PIXELS,
+              "g_preprocess_side is outside sign_glyph.h's frame envelope "
               "(1 <= side <= SIGN_MAX_W and side^2 <= SIGN_MAX_PIXELS) — "
               "the glyph front-end would refuse every frame");
+// The camera library accepts 8..512-pixel output frames; the capture side is
+// only constrained by that and by RAM, not by the glyph envelope.
+static_assert(g_frame_side >= 8 && g_frame_side <= 512,
+              "g_frame_side (kCaptureFrameSide) must be 8..512");
+static_assert(g_preprocess_side <= g_frame_side,
+              "kPreprocessFrameSide must not exceed the capture side — the "
+              "device pipeline downscales, it never invents detail");
 // Rejection policy, exported by the host with the model:
 //   1 = each slot rejects with the model's own "_background" class; the OOD
 //       gates are opened instead of tuned, and the per-slot match rule (ink,
@@ -272,19 +288,26 @@ static constexpr uint8_t kMsgTypeControl   = 0x02;  // S3 → P4 control message
 
 // ── UART verdict encoding (flags byte, 9-byte inference packet) ─────────
 // Low nibble 0x02 = "sign reader frame" (same as the other sketches).
-// High nibble is the verdict, and it is the ONLY discriminator receivers
-// need — backward compatible with S3 builds that know only 0x00 / 0xF0:
-//   0x00  MATCH      all three slots matched the target sequence
+// High nibble is the verdict:
+//   0x00  MATCH      all three slots matched ONE allowed plate (flags=0x02)
 //   0xE0  MISMATCH   sign present, but at least one slot did not match
-//   0xF0  NO SIGN    the frame has no ink at all (nothing to read)
-// label_id is the 0xFF sentinel ("verdict, not a class id"); confidence is
-// the MIN per-slot best raw score (0..255), so it means "the weakest slot".
+//                    any allowed plate (flags=0xE2)
+//   0xF0  NO SIGN    the frame has no ink at all (flags=0xF2)
+//
+// label_id (byte 5) says WHICH plate matched — this is the multi-plate
+// protocol the ESP32-S3 gatekeeper consumes:
+//   0 .. kTargetSignCount-1   MATCH, the matched plate index
+//   0xFE                      MISMATCH   (no plate matched all 3 slots)
+//   0xFF                      NO SIGN    (nothing to read)
+// confidence is the MIN per-slot best raw score (0..255), so it means
+// "the weakest slot".
 static constexpr uint8_t kFlagsSignReady     = 0x02;
 static constexpr uint8_t kFlagsVerdictMask   = 0xF0;
 static constexpr uint8_t kFlagsVerdictMatch  = 0x00;
 static constexpr uint8_t kFlagsVerdictMismatch = 0xE0;
 static constexpr uint8_t kFlagsVerdictNoSign = 0xF0;
-static constexpr uint8_t kSignVerdictLabel   = 0xFF;
+static constexpr uint8_t kSignMismatchLabel  = 0xFE;
+static constexpr uint8_t kSignNoSignLabel    = 0xFF;
 
 // S3 → P4 control commands
 static constexpr uint8_t kCtrlAckStop = 0x01;  // S3 confirmed sign → stop TX
@@ -1380,8 +1403,15 @@ static inline void reset_accumulators() {
 // segmentation, then exactly SIGN_SEQUENCE_LEN boxes (merge/split/equal-thirds
 // reconciliation) and one normalised glyph per box.  Reading order is applied
 // by reversing the box list; pixels are never mirrored.
+//
+// RESOLUTION: the camera captures at g_frame_side (160 by default in a new
+// export) but the split runs at g_preprocess_side (96) — the host preview
+// box-averages the same 160→96, and the split's absolute-pixel heuristics
+// (border strip, min run) were tuned at that resolution.  The downscale is
+// the exact integer box average in frame_resize.h.
 static SignScratch s_sign_scratch;                 // views into s_sign_scratch_block
 static uint8_t   *s_sign_scratch_block = nullptr;
+static uint8_t    s_preprocess_gray[(size_t)g_preprocess_side * (size_t)g_preprocess_side];
 static uint8_t    s_slot_glyphs[SIGN_SEQUENCE_LEN][SIGN_GLYPH_SIZE * SIGN_GLYPH_SIZE];
 static SignSlotInfo s_slot_info[SIGN_SEQUENCE_LEN];
 static SignGlyphInfo s_sign_info;
@@ -1394,9 +1424,10 @@ static uint32_t   s_sign_empty = 0;   // frames where the split found no ink at 
 // One allocation at boot.  sign_scratch_bytes() is a pure function of the
 // geometry and a failure here is a build/config fact, not a transient
 // condition — so setup() halts rather than limping along producing garbage
-// glyphs from a half-initialised scratch.
+// glyphs from a half-initialised scratch.  Sized for the PREPROCESS side,
+// which is what the front-end actually reads.
 static bool sign_scratch_alloc() {
-  const size_t need = sign_scratch_bytes(g_frame_side, g_frame_side, SIGN_GLYPH_SIZE);
+  const size_t need = sign_scratch_bytes(g_preprocess_side, g_preprocess_side, SIGN_GLYPH_SIZE);
   const char *where = "internal SRAM";
   s_sign_scratch_block = (uint8_t *)heap_caps_malloc(need, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (s_sign_scratch_block == nullptr) {
@@ -1408,14 +1439,14 @@ static bool sign_scratch_alloc() {
     return false;
   }
   if (!sign_scratch_init(&s_sign_scratch, s_sign_scratch_block, need,
-                         g_frame_side, g_frame_side, SIGN_GLYPH_SIZE)) {
+                         g_preprocess_side, g_preprocess_side, SIGN_GLYPH_SIZE)) {
     Serial.printf("FATAL: sign scratch %u bytes is too small for %dx%d -> %dx%d.\r\n",
-                  (unsigned)need, g_frame_side, g_frame_side,
+                  (unsigned)need, g_preprocess_side, g_preprocess_side,
                   SIGN_SEQUENCE_LEN, SIGN_GLYPH_SIZE);
     return false;
   }
   Serial.printf("Sign scratch: %u bytes in %s (%dx%d gray -> %d slots of %d)\r\n",
-                (unsigned)need, where, g_frame_side, g_frame_side,
+                (unsigned)need, where, g_preprocess_side, g_preprocess_side,
                 SIGN_SEQUENCE_LEN, SIGN_GLYPH_SIZE);
   return true;
 }
@@ -1441,9 +1472,18 @@ static bool sign_feed_slots() {
   if (gray == nullptr) {
     return false;
   }
+  const uint8_t *frame = gray;
+  int frame_side = g_frame_side;
+  if (g_frame_side != g_preprocess_side) {
+    // Capture 160×160 -> front-end 96×96; same box average as the host.
+    FrameResizeBoxAverageGray(gray, g_frame_side,
+                              s_preprocess_gray, g_preprocess_side);
+    frame = s_preprocess_gray;
+    frame_side = g_preprocess_side;
+  }
 
   const bool ok = preprocess_sign_sequence_c(
-      gray, g_frame_side, g_frame_side, SIGN_GLYPH_SIZE,
+      frame, frame_side, frame_side, SIGN_GLYPH_SIZE,
       SIGN_SEQUENCE_LEN,
       kSignReadingOrder,
       kSignPolarity,      /* captures: dark ink on a bright sign    */
@@ -1881,7 +1921,7 @@ static void inference_task(void *arg) {
     // the top of the file):
     //   NO SIGN   no ink anywhere in the frame
     //   MISMATCH  a sign is present, but at least one slot did not match
-    //   MATCH     all three slots matched the target sequence
+    //   MATCH     all three slots matched ONE allowed plate
     // A MATCH therefore requires the ink check, the per-slot class check, the
     // "_background" rejection AND the confidence floor; one slot failing any
     // of them is a NO.
@@ -1896,10 +1936,14 @@ static void inference_task(void *arg) {
       pkt_flags = (uint8_t)((pkt_flags & 0x0F) | kFlagsVerdictMatch);
     }
 
-    // label_id / confidence carry diagnostics, not a class: 0xFF says "read
-    // the flags", and confidence is the WEAKEST slot's best raw score so a
+    // label_id carries the verdict detail the S3 needs to know WHICH car
+    // matched: the matched plate index on MATCH, 0xFE on MISMATCH, 0xFF on
+    // NO SIGN.  confidence is the WEAKEST slot's best raw score so a
     // receiver can gate on the same 0..255 scale as before (S3 uses 120).
-    const uint8_t label_id = kSignVerdictLabel;
+    uint8_t label_id = kSignNoSignLabel;
+    if (!no_sign) {
+      label_id = all_match ? (uint8_t)matched_plate : kSignMismatchLabel;
+    }
     const uint8_t confidence = (uint8_t)(slot_best_min < 0 ? 0
                                          : (slot_best_min > 255 ? 255 : slot_best_min));
 
@@ -1908,7 +1952,8 @@ static void inference_task(void *arg) {
       if (no_sign) {
         Serial.print("NO SIGN (frame has no ink)");
       } else if (all_match) {
-        Serial.printf("MATCH (YES) plate=%s", SIGN_PLATE_TEXT(matched_plate));
+        Serial.printf("MATCH (YES) plate#%d=%s", matched_plate + 1,
+                      SIGN_PLATE_TEXT(matched_plate));
       } else {
         Serial.print("NO MATCH (NO)");
       }
@@ -2108,11 +2153,17 @@ void setup() {
   delay(100);
   Serial.println("P4 TFLite start");
 
-  // USER CONFIG (top of this file): push g_frame_side + g_flip_180 into
+  // USER CONFIG (top of this file): push the CAPTURE side + g_flip_180 into
   // the camera library before any capture/inference code runs.
   ImageProviderConfigureCamera(g_frame_side, g_flip_180);
-  Serial.printf("Camera config: frame_side=%d flip_180=%d\r\n",
-                (int)g_frame_side, (int)g_flip_180);
+  Serial.printf("Camera config: capture=%d preprocess=%d model=%d flip_180=%d\r\n",
+                (int)g_frame_side, (int)g_preprocess_side, (int)kNumCols,
+                (int)g_flip_180);
+  if (g_frame_side != g_preprocess_side) {
+    Serial.printf("Resolution: camera %dx%d -> box-average %dx%d -> glyph front-end\r\n",
+                  (int)g_frame_side, (int)g_frame_side,
+                  (int)g_preprocess_side, (int)g_preprocess_side);
+  }
 #if PREPROCESS_MODE == PREPROCESS_MODE_BG
   Serial.printf("Preprocess: B-G  | Camera: %s\n", CameraGetName());
 #elif PREPROCESS_MODE == PREPROCESS_MODE_GRAY
@@ -2125,7 +2176,7 @@ void setup() {
   // The model input is ONE 28x28 canvas per sign slot, built by sign_glyph.c
   // from the RAW library gray frame; GetImage() is never called on this path.
   Serial.printf("Preprocess: SIGN glyph (%dx%d gray -> %d slots of %d, ink=%s, %s, min_run=%d, thresh=%s)\r\n",
-                g_frame_side, g_frame_side, SIGN_SEQUENCE_LEN, SIGN_GLYPH_SIZE,
+                g_preprocess_side, g_preprocess_side, SIGN_SEQUENCE_LEN, SIGN_GLYPH_SIZE,
                 kSignPolarity == SIGN_INK_DARK ? "dark-on-bright" : "bright-on-dark",
                 kSignConvention == SIGN_NORM_CANON ? "NORM_CANON" : "NORM_STRETCH",
                 kSignMinRun,
@@ -2136,10 +2187,10 @@ void setup() {
                 (double)kSignMatchMinProb,
                 (int)kExportDarkThr, (int)kExportLumThr,
                 kSignWindowAdjusted ? "  [sliders active]" : "  [defaults: exact Otsu]");
-  if (g_frame_side != 96) {
-    Serial.printf("WARNING: the sign training captures are 96x96 — a %d-wide frame is a "
-                  "different source resolution than the model was trained on.\r\n",
-                  g_frame_side);
+  if (g_preprocess_side != 96) {
+    Serial.printf("WARNING: the sign training captures are 96x96 — preprocessing at %d "
+                  "is a different source resolution than the model was trained on.\r\n",
+                  g_preprocess_side);
   }
   if (kSignBackgroundReplacesOod) {
     Serial.println("OOD: bypassed — each slot rejects with the model's \"_background\" class "

@@ -11,6 +11,17 @@ constexpr int kNumChannels = 1;
 
 constexpr int kMaxImageSize = kNumCols * kNumRows * kNumChannels;
 
+// ── Resolution layers (capture -> preprocess -> model) ───────────
+// The MCU may capture at a different side than the model input;
+// the sketches box-average the captured square frame down to the
+// preprocessing side before the glyph/ROI transform.
+#define TM_MODEL_INPUT_SIDE 28
+#define TM_PREPROCESS_FRAME_SIDE 96
+#define TM_CAPTURE_FRAME_SIDE 160
+constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;
+constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;
+constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;
+
 // TM_OCR_GLYPH_MODEL says which device sketch this model belongs to:
 //   1 = TFLite_OCR/ (single-glyph, 28x28 canvas, "_background" rejector)
 //   0 = TFLite/ (legacy 96x96) or TFLite_Sign/ (3-character sign reader)
@@ -29,7 +40,7 @@ constexpr int kMaxImageSize = kNumCols * kNumRows * kNumChannels;
 // so the defaults are a bit-exact no-op.
 #define TM_THRESHOLD_WINDOW_EXPORTED 1
 #define kDarkThr 13
-#define kLumThr 103
+#define kLumThr 98
 
 constexpr int kCategoryCount = 3;
 extern const char* kCategoryLabels[kCategoryCount];

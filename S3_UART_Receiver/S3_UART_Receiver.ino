@@ -37,22 +37,67 @@ struct Packet {
   uint8_t flags;
 };
 
-// ── flags contract (shared with TFLite.ino on P4) ───────────────────────
-//   flags byte = [high nibble: OOD status] [low nibble: sign_ready]
+// ── flags + label_id contract (shared with the P4 sketches) ─────────────
+//   flags byte = [high nibble: verdict] [low nibble: sign_ready]
 //   low  nibble == 0x2  →  sign_ready (legacy value, unchanged)
-//   high nibble == 0x0  →  in-distribution (real sign)
-//   high nibble == 0xF  →  OUT of distribution (No Sign)
+//   high nibble == 0x0  →  MATCH (flags 0x02; label_id = matched plate index)
+//   high nibble == 0xE  →  MISMATCH (flags 0xE2; label_id = 0xFE)
+//   high nibble == 0xF  →  NO SIGN / OUT of distribution (flags 0xF2;
+//                          label_id = 0xFF)
+//
+// Byte 5 (label_id) is what lets the S3 know WHICH allowed plate matched:
+// TFLite_Sign sends the matched plate index 0 .. kTargetSignCount-1 on a
+// MATCH, so the gate can name the car instead of only saying "a sign".
+// Older P4 sketches still send a class index with the same flags; this
+// receiver resolves the id through the exported kTargetSignSequences table
+// (copied from the sign export) and falls back to kCategoryLabels for a
+// legacy build.
 //
 // Receivers MUST use these helpers — NEVER trust label_id/confidence when
-// pkt_is_no_sign() returns true, even if confidence is close to 255.
+// pkt_is_no_sign() returns true, even if confidence is close to 255.  A
+// MISMATCH is deliberately NOT a real sign: it must never trigger ACK_STOP.
 static constexpr uint8_t kFlagsMaskSignReady = 0x0F;
 static constexpr uint8_t kFlagsMaskOodStatus = 0xF0;
 static constexpr uint8_t kFlagsSignReady     = 0x02;
+static constexpr uint8_t kFlagsVerdictMatch  = 0x00;
+static constexpr uint8_t kFlagsVerdictMismatch = 0xE0;
 static constexpr uint8_t kFlagsOodNoSign     = 0xF0;
+static constexpr uint8_t kSignMismatchLabel  = 0xFE;
+static constexpr uint8_t kSignNoSignLabel    = 0xFF;
+
+// Multi-plate exports put the plate index in label_id.  The table is only
+// present when model_settings.h came from a sign export (the S3 folder
+// ships with the same copy as TFLite_Sign/); legacy exports keep the
+// class-index interpretation.
+#ifndef TM_SIGN_MULTI_TARGET_EXPORTED
+#define TM_SIGN_MULTI_TARGET_EXPORTED 0
+#endif
+
+static inline bool label_is_plate_index(uint8_t label_id, bool real_sign) {
+#if TM_SIGN_MULTI_TARGET_EXPORTED
+  return real_sign && label_id < (uint8_t)kTargetSignCount;
+#else
+  (void)label_id; (void)real_sign;
+  return false;
+#endif
+}
+static inline const char* plate_text(uint8_t plate_index) {
+#if TM_SIGN_MULTI_TARGET_EXPORTED
+  if (plate_index < (uint8_t)kTargetSignCount) {
+    return kTargetSignSequences[plate_index];
+  }
+#else
+  (void)plate_index;
+#endif
+  return "?";
+}
 
 static inline bool pkt_is_real_sign(uint8_t flags) {
   return (flags & kFlagsMaskSignReady) == kFlagsSignReady &&
-         (flags & kFlagsMaskOodStatus) == 0x00;
+         (flags & kFlagsMaskOodStatus) == kFlagsVerdictMatch;
+}
+static inline bool pkt_is_mismatch(uint8_t flags) {
+  return (flags & kFlagsMaskOodStatus) == kFlagsVerdictMismatch;
 }
 static inline bool pkt_is_no_sign(uint8_t flags) {
   return (flags & kFlagsMaskOodStatus) == kFlagsOodNoSign;
@@ -217,16 +262,36 @@ static void uart_task(void *arg) {
     if (read_packet(&p)) {
       s_packets_ok++;
       const bool real_sign = pkt_is_real_sign(p.flags);
+      const bool mismatch  = pkt_is_mismatch(p.flags);
       const bool no_sign   = pkt_is_no_sign(p.flags);
+      // Multi-plate protocol: on a MATCH, label_id is the matched plate
+      // index; MISMATCH/NO SIGN carry 0xFE/0xFF.  label_is_plate_index()
+      // also keeps a legacy class-index packet readable — it only accepts an
+      // id inside the exported plate table.
+      const bool plate_frame = label_is_plate_index(p.label_id, real_sign);
       const char *label = "No Sign";
-      if (real_sign && p.label_id < kCategoryCount) {
-        label = kCategoryLabels[p.label_id];
+      if (real_sign) {
+        label = plate_frame ? plate_text(p.label_id)
+                            : (p.label_id < kCategoryCount
+                                   ? kCategoryLabels[p.label_id]
+                                   : "MATCH");
+      } else if (mismatch) {
+        label = "NO MATCH";
+      } else if (no_sign) {
+        label = "NO SIGN";
       }
 
       DBG.print("frame=");
       DBG.print(p.frame_id);
       DBG.print(" label=");
-      DBG.print(real_sign ? (int)p.label_id : -1);
+      if (real_sign) {
+        if (plate_frame) DBG.printf("%d(%s)", (int)p.label_id, label);
+        else             DBG.print((int)p.label_id);
+      } else if (mismatch) {
+        DBG.print("MISMATCH");
+      } else {
+        DBG.print("NO_SIGN");
+      }
       DBG.print("(");
       DBG.print(label);
       DBG.print(")");
@@ -235,6 +300,7 @@ static void uart_task(void *arg) {
       DBG.print(" flags=0x");
       DBG.print(p.flags, 16);
       DBG.print(no_sign   ? " [NO SIGN (OOD)]" : "");
+      DBG.print(mismatch  ? " [NO MATCH]"      : "");
       DBG.print(real_sign ? " [REAL SIGN]"     : "");
 
       // ── Sign confirmation state machine ──
@@ -252,8 +318,9 @@ static void uart_task(void *arg) {
 
         if (s_consecutive_sign_frames >= kSignConfirmFrames) {
           s_sign_confirmed = true;
-          DBG.printf("SIGN CONFIRMED: label=%d(%s) conf=%d after %d frames [flags=0x%02X]\n",
-                     p.label_id, label, p.confidence, s_consecutive_sign_frames, p.flags);
+          DBG.printf("SIGN CONFIRMED: label=%d(%s)%s conf=%d after %d frames [flags=0x%02X]\n",
+                     p.label_id, label, plate_frame ? " [PLATE]" : "",
+                     p.confidence, s_consecutive_sign_frames, p.flags);
 
           // Step 1: Tell P4 to stop transmitting
           bool p4_stopped = false;
@@ -315,9 +382,9 @@ static void uart_task(void *arg) {
           DBG.println("S3: cycle complete, ready for next sign");
         }
       } else {
-        // No-Sign (OOD) frame, confidence too low, or different label — reset counter.
-        // A burst of OOD frames MUST reset the count so we don't accumulate
-        // hallucinated labels across scene cuts.
+        // No-Sign / MISMATCH frame, confidence too low, or a different label —
+        // reset the counter.  A burst of OOD or mismatch frames MUST reset the
+        // count so we don't accumulate a partial match across scene cuts.
         s_last_sign_label = 0xFF;
         s_consecutive_sign_frames = 0;
       }

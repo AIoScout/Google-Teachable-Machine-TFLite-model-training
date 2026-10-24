@@ -14,15 +14,17 @@ limitations under the License.
 ==============================================================================*/
 
 // ═══════════════════════════════════════════════════════════════════════
-// USER CONFIG — edit these two values only (edit HERE, in this file)
+// RESOLUTION LAYERS — stamped into model_settings.h by Export Model
 //
-//   g_frame_side
-//     Capture / serial-stream resolution (8-512).  The camera libraries
-//     follow it at runtime (unified API, applied in setup()).  Same
-//     variable name as the camera-library example sketches.  The MODEL
-//     INPUT is the 28x28 glyph canvas (ocr_glyph.h OCR_GLYPH_SIZE), which
-//     the front-end builds from this frame; to change it, re-export the
-//     model from AItraining at that img_size and update ocr_glyph.h.
+//   TM_CAPTURE_FRAME_SIDE      camera / serial-stream side    (e.g. 160)
+//   TM_PREPROCESS_FRAME_SIDE   glyph front-end input side     (e.g. 96)
+//   TM_MODEL_INPUT_SIDE        glyph canvas side              (28)
+//
+// They are deliberately independent.  The camera captures at 160×160; the
+// glyph front-end runs on the 96×96 box-averaged frame (the same resolution
+// AItraining previews and the training captures use); the glyph is then
+// resampled to the 28×28 model canvas.  g_frame_side is the CAPTURE side
+// only — never assume it equals the model input.
 //
 //   g_flip_180
 //     The camera is mounted upside down on the board; the library rotates
@@ -30,20 +32,30 @@ limitations under the License.
 //     Set to false only if your mount differs.
 //
 //   (constexpr here, unlike the examples, because this sketch sizes
-//    compile-time arrays from g_frame_side.)
+//    compile-time arrays from g_frame_side / g_preprocess_side.)
 // ═══════════════════════════════════════════════════════════════════════
-constexpr int  g_frame_side = 96;
-constexpr bool g_flip_180   = true;
-
 // #include <TensorFlowLite.h>
 
 #include "main_functions.h"
-#include "image_provider.h"
-#include "model_settings.h"
+#include "model_settings.h"   // before USER CONFIG: it carries the resolution sides
+#include "image_provider.h"   // includes frame_resize.h (box-average helper)
 // Include the exported model data header.
 // Rename this include to match your exported model's header file name,
 // e.g. "Square_model_data.h" or "MyModel_model_data.h".
 #include "tm_model_data.h"
+
+// Older exports predate the resolution macros: keep their 96×96 capture
+// behaviour, where capture and preprocessing were the same frame.
+#ifndef TM_CAPTURE_FRAME_SIDE
+#define TM_CAPTURE_FRAME_SIDE 96
+#endif
+#ifndef TM_PREPROCESS_FRAME_SIDE
+#define TM_PREPROCESS_FRAME_SIDE 96
+#endif
+
+constexpr int  g_frame_side      = TM_CAPTURE_FRAME_SIDE;
+constexpr int  g_preprocess_side = TM_PREPROCESS_FRAME_SIDE;
+constexpr bool g_flip_180        = true;
 
 
 #include "tensorflow/lite/micro/micro_log.h"
@@ -112,19 +124,24 @@ static constexpr int kOcrPinnedThresh = !kOcrWindowAdjusted
 static_assert(OCR_GLYPH_SIZE == 28, "OCR_GLYPH_SIZE changed — it must equal "
                                     "AItraining ocr_preprocess.GLYPH_SIZE; "
                                     "re-verify TFLite_OCR/ tools first");
-// Same class of tripwire for the USER CONFIG frame size.  The front-end
+// Same class of tripwire for the PREPROCESSING frame size.  The front-end
 // refuses frames outside ocr_glyph.h's envelope (frame_in_bounds: 1 <= w <=
 // OCR_MAX_W, w*h <= OCR_MAX_PIXELS) and our caller passes w == h ==
-// g_frame_side, so the whole envelope collapses to this one square-frame
-// test.  Catching it here beats catching it at runtime: an out-of-envelope
-// frame is a legal USER CONFIG value, the refuser is inside the library, and
-// the observable symptom would be a silently all-zero glyph forever (it IS
-// zeroed, per the header contract — it just never gets any ink in it).
-static_assert(g_frame_side >= 1 && g_frame_side <= OCR_MAX_W &&
-                  (int64_t)g_frame_side * g_frame_side <= OCR_MAX_PIXELS,
-              "g_frame_side is outside ocr_glyph.h's frame envelope "
+// g_preprocess_side, so the whole envelope collapses to this one square-frame
+// test.  The camera capture side may be larger (160) — it is box-averaged
+// down first, so it is deliberately NOT the value tested here.
+static_assert(g_preprocess_side >= 1 && g_preprocess_side <= OCR_MAX_W &&
+                  (int64_t)g_preprocess_side * g_preprocess_side <= OCR_MAX_PIXELS,
+              "g_preprocess_side is outside ocr_glyph.h's frame envelope "
               "(1 <= side <= OCR_MAX_W and side^2 <= OCR_MAX_PIXELS) — "
               "the glyph front-end would refuse every frame");
+// The camera library accepts 8..512-pixel output frames; the capture side is
+// only constrained by that and by RAM, not by the glyph envelope.
+static_assert(g_frame_side >= 8 && g_frame_side <= 512,
+              "g_frame_side (kCaptureFrameSide) must be 8..512");
+static_assert(g_preprocess_side <= g_frame_side,
+              "kPreprocessFrameSide must not exceed the capture side — the "
+              "device pipeline downscales, it never invents detail");
 static constexpr OcrConvention kOcrConvention   = OCR_NORM_CANON;     // the convention the OCR mix trains in
 // OCR rejects with the model's own "_background" class, so the OOD gates are
 // opened instead of tuned: sign_pct has no meaning on this path, and the
@@ -1289,8 +1306,15 @@ static inline void reset_accumulators() {
 // produces the sign pipeline's cropped/stretched 96x96 image (a different
 // distribution) and it writes IMG_SIZE² = 9216 bytes into a 784-byte tensor,
 // corrupting the arena.
+//
+// RESOLUTION: the camera captures at g_frame_side (160 by default in a new
+// export) but the glyph front-end runs at g_preprocess_side (96) — the host
+// preview box-averages the same 160→96, and the segmenter's absolute-pixel
+// heuristics (border strip, min run) were tuned at that resolution.  The
+// downscale is the exact integer box average in frame_resize.h.
 static OcrScratch s_ocr_scratch;                                    // views into s_ocr_scratch_block
 static uint8_t   *s_ocr_scratch_block = nullptr;
+static uint8_t    s_preprocess_gray[(size_t)g_preprocess_side * (size_t)g_preprocess_side];
 static uint8_t    s_ocr_glyph[OCR_GLYPH_SIZE * OCR_GLYPH_SIZE];
 static uint32_t   s_ocr_frames = 0;
 static uint32_t   s_ocr_empty = 0;   // frames where the segmenter found no glyph
@@ -1298,9 +1322,10 @@ static uint32_t   s_ocr_empty = 0;   // frames where the segmenter found no glyp
 // One allocation at boot.  ocr_scratch_bytes() is a pure function of the
 // geometry and a failure here is a build/config fact, not a transient
 // condition — so setup() halts rather than limping along producing garbage
-// glyphs from a half-initialised scratch.
+// glyphs from a half-initialised scratch.  Sized for the PREPROCESS side,
+// which is what the front-end actually reads.
 static bool ocr_scratch_alloc() {
-  const size_t need = ocr_scratch_bytes(g_frame_side, g_frame_side, OCR_GLYPH_SIZE);
+  const size_t need = ocr_scratch_bytes(g_preprocess_side, g_preprocess_side, OCR_GLYPH_SIZE);
   const char *where = "internal SRAM";
   s_ocr_scratch_block = (uint8_t *)heap_caps_malloc(need, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (s_ocr_scratch_block == nullptr) {
@@ -1312,13 +1337,13 @@ static bool ocr_scratch_alloc() {
     return false;
   }
   if (!ocr_scratch_init(&s_ocr_scratch, s_ocr_scratch_block, need,
-                        g_frame_side, g_frame_side, OCR_GLYPH_SIZE)) {
+                        g_preprocess_side, g_preprocess_side, OCR_GLYPH_SIZE)) {
     Serial.printf("FATAL: OCR scratch %u bytes is too small for %dx%d -> %d.\r\n",
-                  (unsigned)need, g_frame_side, g_frame_side, OCR_GLYPH_SIZE);
+                  (unsigned)need, g_preprocess_side, g_preprocess_side, OCR_GLYPH_SIZE);
     return false;
   }
   Serial.printf("OCR scratch: %u bytes in %s (%dx%d gray -> %d glyph)\r\n",
-                (unsigned)need, where, g_frame_side, g_frame_side, OCR_GLYPH_SIZE);
+                (unsigned)need, where, g_preprocess_side, g_preprocess_side, OCR_GLYPH_SIZE);
   return true;
 }
 
@@ -1343,9 +1368,18 @@ static bool ocr_feed_glyph(TfLiteTensor *tensor) {
   if (gray == nullptr) {
     return false;
   }
+  const uint8_t *frame = gray;
+  int frame_side = g_frame_side;
+  if (g_frame_side != g_preprocess_side) {
+    // Capture 160×160 -> front-end 96×96; same box average as the host.
+    FrameResizeBoxAverageGray(gray, g_frame_side,
+                              s_preprocess_gray, g_preprocess_side);
+    frame = s_preprocess_gray;
+    frame_side = g_preprocess_side;
+  }
 
   OcrGlyphInfo info;
-  ocr_preprocess_gray_window(gray, g_frame_side, g_frame_side, OCR_GLYPH_SIZE,
+  ocr_preprocess_gray_window(frame, frame_side, frame_side, OCR_GLYPH_SIZE,
                              kOcrPolarity,      /* captures: dark ink on bright page */
                              kOcrSegment,
                              kOcrMinRun,        /* = 2, matches MIN_GLYPH_RUN  */
@@ -1933,11 +1967,17 @@ void setup() {
   delay(100);
   Serial.println("P4 TFLite start");
 
-  // USER CONFIG (top of this file): push g_frame_side + g_flip_180 into
+  // USER CONFIG (top of this file): push the CAPTURE side + g_flip_180 into
   // the camera library before any capture/inference code runs.
   ImageProviderConfigureCamera(g_frame_side, g_flip_180);
-  Serial.printf("Camera config: frame_side=%d flip_180=%d\r\n",
-                (int)g_frame_side, (int)g_flip_180);
+  Serial.printf("Camera config: capture=%d preprocess=%d model=%d flip_180=%d\r\n",
+                (int)g_frame_side, (int)g_preprocess_side, (int)kNumCols,
+                (int)g_flip_180);
+  if (g_frame_side != g_preprocess_side) {
+    Serial.printf("Resolution: camera %dx%d -> box-average %dx%d -> glyph front-end\r\n",
+                  (int)g_frame_side, (int)g_frame_side,
+                  (int)g_preprocess_side, (int)g_preprocess_side);
+  }
 #if PREPROCESS_MODE == PREPROCESS_MODE_BG
   Serial.printf("Preprocess: B-G  | Camera: %s\n", CameraGetName());
 #elif PREPROCESS_MODE == PREPROCESS_MODE_GRAY
@@ -1950,7 +1990,7 @@ void setup() {
   // The model input is a 28x28 canvas built by ocr_glyph.c from the RAW
   // library gray frame; GetImage() is never called on this path.
   Serial.printf("Preprocess: OCR glyph (%dx%d gray -> %d, ink=%s, %s, min_run=%d, thresh=%s)\r\n",
-                g_frame_side, g_frame_side, OCR_GLYPH_SIZE,
+                g_preprocess_side, g_preprocess_side, OCR_GLYPH_SIZE,
                 kOcrPolarity == OCR_INK_DARK ? "dark-on-bright" : "bright-on-dark",
                 kOcrConvention == OCR_NORM_CANON ? "NORM_CANON" : "NORM_STRETCH",
                 kOcrMinRun,
@@ -1959,10 +1999,10 @@ void setup() {
                 (int)kExportDarkThr, (int)kExportLumThr,
                 kOcrWindowAdjusted ? "sliders active (pinned threshold + floor)"
                                    : "defaults: exact Otsu, no floor");
-  if (g_frame_side != 96) {
-    Serial.printf("WARNING: the OCR training captures are 96x96 — a %d-wide frame is a "
-                  "different source resolution than the model was trained on.\r\n",
-                  g_frame_side);
+  if (g_preprocess_side != 96) {
+    Serial.printf("WARNING: the OCR training captures are 96x96 — preprocessing at %d "
+                  "is a different source resolution than the model was trained on.\r\n",
+                  g_preprocess_side);
   }
   Serial.printf("OOD: Layer 1 (sign_pct) is inert on the OCR path; rejection = the model's "
                 "\"_background\" class%s\r\n",

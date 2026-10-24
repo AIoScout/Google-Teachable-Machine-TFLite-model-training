@@ -26,6 +26,9 @@ hallucinates a high-confidence class on any input, including empty desks).
 
 - `msg_type = 0x01` (inference)
 - `checksum  = XOR of bytes 0..7`
+- `label_id` = class index for the image/OCR sketches; for the multi-plate
+  sign sketch it is the **matched plate index** on MATCH, `0xFE` on
+  MISMATCH and `0xFF` on NO SIGN (see the contract below)
 
 ### S3 → P4 (5 bytes)
 
@@ -39,48 +42,62 @@ hallucinates a high-confidence class on any input, including empty desks).
 
 Both commands retry up to 3 times with RX-line idleness verification on the S3 side.
 
-## Flags Contract (MUST be applied before using label_id/confidence)
+## Flags + label_id Contract (apply before using confidence)
 
 `flags` byte layout (shared with the P4 TFLite firmware + SD cards `labels.csv`):
 
 ```
   7  6  5  4   3  2  1  0
- ├────OOD────┤ ├─sign_ready─┤
+ ├───verdict──┤ ├─sign_ready─┤
 ```
 
 | Bit range  | Name         | Values                                            |
 |---|---|---|
-| bits 7–4   | OOD status   | `0x0` → in-distribution (real sign)<br>`0xF` → OUT of distribution (**No Sign**) |
+| bits 7–4   | verdict      | `0x0` → MATCH<br>`0xE` → MISMATCH<br>`0xF` → NO SIGN / OUT of distribution |
 | bits 3–0   | sign_ready   | `0x2` → sign_ready (legacy value, preserved) |
 
-**Common values:**
+**Common values (multi-plate sign firmware):**
 
-| `flags` | Meaning | What to do with `label_id` / `confidence` |
+| `flags` | Meaning | `label_id` (byte 5) |
 |---|---|---|
-| `0x02`  | **Real sign** (in-distribution, sign_ready) | Use them. `label_id` indexes `kCategoryLabels`. |
-| `0xF2`  | **No Sign** (OOD-suppressed, sign_ready)   | **Ignore both.** They still hold softmax's hallucinated best-class for offline analysis, but this frame has been rejected by the OOD cascade. |
+| `0x02`  | **MATCH** — one allowed plate read exactly | matched **plate index** `0 … kTargetSignCount-1` |
+| `0xE2`  | **MISMATCH** — a sign is present, no allowed plate matched | `0xFE` |
+| `0xF2`  | **NO SIGN** — no ink / rejected | `0xFF` |
 
-Other low-nibble values are reserved; treat them the same as `0x02` for future compat.
-Any high-nibble value other than `0x0` / `0xF` is reserved for future status codes and
-should currently be treated as "No Sign" to be safe.
+`confidence` (byte 6) is always the weakest slot's best raw score (0..255);
+ignore it on MISMATCH / NO SIGN.
 
-**In code, always use these two helpers (defined in `S3_UART_Receiver.ino`):**
+`label_id` is resolved through this folder's `model_settings.h`, which is a
+copy of the sign export: `kTargetSignCount` and
+`kTargetSignSequences[kTargetSignCount][4]` name the plate, e.g.
+`label=1(B18)`.  Keep that copy in step with the export flashed to the P4.  A
+legacy P4 build that still sends a class index in `label_id` is resolved
+through `kCategoryLabels` as before.
+
+**In code, always use these helpers (defined in `S3_UART_Receiver.ino`):**
 
 ```cpp
-pkt_is_real_sign(p.flags)   // true  → real sign,  OK to use label/confidence
-pkt_is_no_sign(p.flags)     // true  → No Sign,   ignore label/confidence
+pkt_is_real_sign(p.flags)   // true  → MATCH,     OK to use label/confidence
+pkt_is_mismatch(p.flags)    // true  → MISMATCH,  never confirms a sign
+pkt_is_no_sign(p.flags)     // true  → NO SIGN,   ignore label/confidence
+label_is_plate_index(p.label_id, pkt_is_real_sign(p.flags))
 ```
+
+Other low-nibble values are reserved; treat them the same as `0x02` for future
+compat.  Any high-nibble value other than `0x0` / `0xE` / `0xF` is reserved
+and should currently be treated as "No Sign" to be safe.
 
 ## Sign Confirmation
 
 Confidence + continuity (no junction/sign phase flags), with the additional
-constraint that **No Sign frames never count**, even if softmax hallucinated a
-confident, stable label for 10 consecutive frames on an empty scene.
+constraint that **MISMATCH and NO SIGN frames never count**, even if softmax
+hallucinated a confident, stable label for 10 consecutive frames on an empty
+scene.
 
-Trigger: the same class for `kSignConfirmFrames` consecutive frames where
-`pkt_is_real_sign(flags) == true` AND `confidence >= kSignConfirmConfidence`.
-Any No Sign frame, any low-confidence frame, or any class change resets the
-counter.
+Trigger: the same **matched plate index** for `kSignConfirmFrames`
+consecutive frames where `pkt_is_real_sign(flags) == true` AND
+`confidence >= kSignConfirmConfidence`.  Any MISMATCH/NO SIGN frame, any
+low-confidence frame, or any plate change resets the counter.
 
 | Constant | Default | Description |
 |---|---|---|
@@ -91,14 +108,19 @@ counter.
 ### Example sequence
 
 ```
-frame=41 label=0(NO ENTRY) conf=221 flags=0x02 [REAL SIGN]  cnt=1
-frame=42 label=0(NO ENTRY) conf=218 flags=0x02 [REAL SIGN]  cnt=2
-frame=43 label=0(NO ENTRY) conf=230 flags=0x02 [REAL SIGN]  cnt=3
-frame=44 label=0(NO ENTRY) conf=214 flags=0xF2 [NO SIGN (OOD)]  cnt=0   ← hand moved, OOD reset
-frame=45 label=0(NO ENTRY) conf=241 flags=0x02 [REAL SIGN]  cnt=1
+frame=41 label=0(A12) conf=221 flags=0x02 [REAL SIGN]  cnt=1
+frame=42 label=0(A12) conf=218 flags=0x02 [REAL SIGN]  cnt=2
+frame=43 label=0(A12) conf=230 flags=0x02 [REAL SIGN]  cnt=3
+frame=44 label=NO_SIGN conf=214 flags=0xF2 [NO SIGN (OOD)]  cnt=0   ← hand moved, reset
+frame=45 label=0(A12) conf=241 flags=0x02 [REAL SIGN]  cnt=1
 …
-frame=49..53: 5 in a row real-sign NO ENTRY ≥ 120 → ACK_STOP sent
+frame=49..53: 5 in a row MATCH A12 ≥ 120 → ACK_STOP sent
 ```
+
+A different allowed plate resets continuity too — the counter tracks the
+**matched plate index**, so switching cars mid-stream cannot confirm the
+wrong one.  MISMATCH frames print `label=MISMATCH(NO MATCH)` with
+`flags=0xE2` and never advance the counter.
 
 ## Baud Rates
 

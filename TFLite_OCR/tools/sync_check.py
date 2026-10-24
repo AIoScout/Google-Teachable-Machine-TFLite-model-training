@@ -6,8 +6,8 @@ lives in more than one place.  Not all of them *should* be identical — the
 whole point is that each folder carries its own exported model — so this check
 is a three-way classification, not a plain diff:
 
-    SHARED      image_provider.{cpp,h}, main_functions.h, arduino_main.cpp
-                One source of truth, three identical copies.  A pipeline fix
+    SHARED      image_provider.{cpp,h}, frame_resize.h, main_functions.h,
+                arduino_main.cpp — one source of truth, three identical copies.  A pipeline fix
                 that lands in only one folder is the exact bug CLAUDE.md's
                 "keep all three in lockstep" warns about, and it fails
                 silently: every sketch still builds.
@@ -48,7 +48,7 @@ SKETCHES = {
     "TFLite_Sign": REPO / "TFLite_Sign",
 }
 
-SHARED = ("image_provider.cpp", "image_provider.h",
+SHARED = ("image_provider.cpp", "image_provider.h", "frame_resize.h",
           "main_functions.h", "arduino_main.cpp")
 PER_SKETCH = ("model_settings.h", "model_settings.cpp", "model_resolver.h",
               "tm_model_data.h", "tm_model_data.cpp")
