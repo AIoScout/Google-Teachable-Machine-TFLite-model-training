@@ -48,7 +48,7 @@ The firmware includes third-party open-source components, including **TensorFlow
 
 ## 7. Governing Law
 
-These terms are governed by the laws of the People's Republic of China.
+These terms are governed by, and construed in accordance with, the laws of the Hong Kong Special Administrative Region of the People's Republic of China. The parties submit to the exclusive jurisdiction of the courts of the Hong Kong Special Administrative Region.
 
 ---
 
