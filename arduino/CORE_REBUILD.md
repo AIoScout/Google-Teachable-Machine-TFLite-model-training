@@ -42,3 +42,9 @@ Restart Arduino IDE after copying the files.
 If an old library with the same name exists, Arduino IDE may pick the wrong one. Remove/rename:
 
 - `<Sketchbook>/libraries/ESP32_P4_IMX219`
+
+## Attribution / licensing
+
+This core is derived from Espressif's arduino-esp32 (LGPL-2.1).  Keep
+`LICENSE.md`, `README.md` and `ATTRIBUTION.md` next to the core folder
+whenever it is copied or zipped for distribution — see ATTRIBUTION.md.

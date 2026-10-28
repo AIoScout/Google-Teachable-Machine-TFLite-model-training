@@ -10,13 +10,15 @@
 ---
 
 **Firmware:** TFLiteTraining device firmware for ESP32-P4 / ESP32-S3
-**Licensor:** AIoScout
+**Licensor:** AIoScout — <https://aioscout.io>
 
 ## 1. License
 
 1.1 The firmware is licensed, not sold. The Licensor grants you a non-exclusive, non-transferable license to **run the firmware on the hardware device(s) it was supplied with or built for**, and to flash it onto devices you own or control.
 
 1.2 The firmware (including any embedded models) remains the property of the Licensor. All rights not expressly granted are reserved.
+
+1.3 **Source provided to purchasers.** Where sketch source (e.g. `TFLite_Sign/`, `TFLite/`) is supplied as a product resource, it is governed by the accompanying `LICENSE-CUSTOMER.txt` in that folder: you may compile and flash it onto your own devices and modify it for your own use, but you must not redistribute, resell or publish it. The bundled TensorFlow Lite Micro component is included under the Apache License 2.0, whose full text accompanies the distribution.
 
 ## 2. Restrictions
 
@@ -50,5 +52,5 @@ These terms are governed by the laws of the People's Republic of China.
 
 ---
 
-**Licensor contact:** [email/website]
+**Licensor contact:** <https://aioscout.io>
 **Version:** 1.0 (2026-10-28)
