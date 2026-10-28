@@ -29,6 +29,14 @@ static constexpr uint8_t kSignConfirmConfidence = 120;  // 120/255 ≈ 47%
 #define UartFromP4 Serial0
 #define DBG Serial
 
+// The deployed gatekeeper runs standalone (no PC).  USB CDC writes block
+// once the host-less buffer fills, which would stall the uart task and
+// kill the gate — so periodic / per-frame debug lines print only while a
+// host actually has the port open (same HWCDC signal the P4 sketch uses).
+static inline bool host_attached() {
+  return DBG.isConnected();
+}
+
 struct Packet {
   uint8_t msg_type;
   uint16_t frame_id;
@@ -113,6 +121,11 @@ static bool s_uart_started = false;
 static bool s_sign_confirmed = false;
 static uint8_t s_last_sign_label = 0xFF;
 static int s_consecutive_sign_frames = 0;
+// Arming gate: after a completed cycle the sign must LEAVE the view (at
+// least one non-confirmable frame) before the next confirmation can start.
+// Without it, frames that kept flowing because the P4 never stopped on
+// ACK_STOP would immediately re-confirm the same sign — a double trigger.
+static bool s_sign_armed = true;
 
 // After ACK_STOP, S3 "does its tasks" for this many ms before sending RESUME_JUNCTION.
 // Adjust to match your real task duration (e.g. display, logging, actuator control).
@@ -254,6 +267,13 @@ static void uart_task(void *arg) {
     s_uart_started = true;
     UartFromP4.begin(kUartBaud, SERIAL_8N1, kUartRxPin, kUartTxPin);
     DBG.printf("UART started rx=%d tx=%d baud=%d\n", kUartRxPin, kUartTxPin, kUartBaud);
+    // Boot-time RESUME: if this S3 rebooted while the P4 was still silenced
+    // by an earlier ACK_STOP (power glitch, relay kick), the P4 would wait
+    // forever and the gate would stay dead until someone resets the P4.
+    // Sending RESUME at boot breaks that deadlock; when the P4 was never
+    // silenced the enable is a harmless no-op (idempotent).
+    send_control_packet(kCtrlResumeJunction);
+    DBG.println("S3: RESUME sent at boot (clears any stale ACK_STOP silence)");
   }
 
   uint32_t last_avail_ms = 0;
@@ -281,34 +301,39 @@ static void uart_task(void *arg) {
         label = "NO SIGN";
       }
 
-      DBG.print("frame=");
-      DBG.print(p.frame_id);
-      DBG.print(" label=");
-      if (real_sign) {
-        if (plate_frame) DBG.printf("%d(%s)", (int)p.label_id, label);
-        else             DBG.print((int)p.label_id);
-      } else if (mismatch) {
-        DBG.print("MISMATCH");
-      } else {
-        DBG.print("NO_SIGN");
+      // Per-frame debug lines print ONLY while a host has the port open:
+      // standalone (no PC) the USB CDC write() blocks once its buffer
+      // fills, which would stall this task and kill the gate entirely.
+      if (host_attached()) {
+        DBG.print("frame=");
+        DBG.print(p.frame_id);
+        DBG.print(" label=");
+        if (real_sign) {
+          if (plate_frame) DBG.printf("%d(%s)", (int)p.label_id, label);
+          else             DBG.print((int)p.label_id);
+        } else if (mismatch) {
+          DBG.print("MISMATCH");
+        } else {
+          DBG.print("NO_SIGN");
+        }
+        DBG.print("(");
+        DBG.print(label);
+        DBG.print(")");
+        DBG.print(" conf=");
+        DBG.print(real_sign ? (int)p.confidence : 0);
+        DBG.print(" flags=0x");
+        DBG.print(p.flags, 16);
+        DBG.print(no_sign   ? " [NO SIGN (OOD)]" : "");
+        DBG.print(mismatch  ? " [NO MATCH]"      : "");
+        DBG.print(real_sign ? " [REAL SIGN]"     : "");
       }
-      DBG.print("(");
-      DBG.print(label);
-      DBG.print(")");
-      DBG.print(" conf=");
-      DBG.print(real_sign ? (int)p.confidence : 0);
-      DBG.print(" flags=0x");
-      DBG.print(p.flags, 16);
-      DBG.print(no_sign   ? " [NO SIGN (OOD)]" : "");
-      DBG.print(mismatch  ? " [NO MATCH]"      : "");
-      DBG.print(real_sign ? " [REAL SIGN]"     : "");
 
       // ── Sign confirmation state machine ──
       // Real sign only: OOD-suppressed ("No Sign") frames never count, even
       // if softmax hallucinated a high-confidence label_id + confidence.
       // This prevents the old bug of 5 consecutive "END" hallucinations on
       // an empty desk being mis-interpreted as a confirmed sign.
-      if (!s_sign_confirmed && real_sign && p.confidence >= kSignConfirmConfidence) {
+      if (!s_sign_confirmed && s_sign_armed && real_sign && p.confidence >= kSignConfirmConfidence) {
         if (p.label_id == s_last_sign_label) {
           s_consecutive_sign_frames++;
         } else {
@@ -375,11 +400,14 @@ static void uart_task(void *arg) {
           if (!p4_resumed)
             DBG.println("S3: WARNING — P4 did not resume TX after 3 retries!");
 
-          // Reset for next cycle
+          // Reset for next cycle.  The sign must LEAVE the view before the
+          // next confirmation may arm — otherwise the frames that kept
+          // flowing (P4 never stopped on ACK_STOP) would double-trigger.
           s_sign_confirmed = false;
           s_last_sign_label = 0xFF;
           s_consecutive_sign_frames = 0;
-          DBG.println("S3: cycle complete, ready for next sign");
+          s_sign_armed = false;
+          DBG.println("S3: cycle complete, waiting for sign to leave before re-arming");
         }
       } else {
         // No-Sign / MISMATCH frame, confidence too low, or a different label —
@@ -387,10 +415,14 @@ static void uart_task(void *arg) {
         // count so we don't accumulate a partial match across scene cuts.
         s_last_sign_label = 0xFF;
         s_consecutive_sign_frames = 0;
+        // A non-confirmable frame (no sign / mismatch / low confidence)
+        // means the sign has left or is not readable: re-arm for the next
+        // cycle.
+        s_sign_armed = true;
       }
     } else {
       const uint32_t now = millis();
-      if (now - last_avail_ms >= 1000) {
+      if (host_attached() && now - last_avail_ms >= 1000) {
         last_avail_ms = now;
         DBG.printf("UART rx_avail=%d bytes=%lu ok=%lu bad=%lu\n", UartFromP4.available(),
                    (unsigned long)s_bytes_rx, (unsigned long)s_packets_ok,
@@ -404,9 +436,11 @@ static void uart_task(void *arg) {
 static void heartbeat_task(void *arg) {
   (void)arg;
   for (;;) {
-    DBG.printf("S3 alive connected=%d bytes=%lu ok=%lu bad=%lu\n", (int)s_p4_connected,
-               (unsigned long)s_bytes_rx, (unsigned long)s_packets_ok,
-               (unsigned long)s_packets_bad);
+    if (host_attached()) {
+      DBG.printf("S3 alive connected=%d bytes=%lu ok=%lu bad=%lu\n", (int)s_p4_connected,
+                 (unsigned long)s_bytes_rx, (unsigned long)s_packets_ok,
+                 (unsigned long)s_packets_bad);
+    }
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }

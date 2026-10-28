@@ -354,6 +354,22 @@ static constexpr uint8_t kCmdSetMode          = 0x05;   // 1× uint8: 0=INFERENC
 static constexpr uint8_t kCmdGetMode          = 0x06;   // → 1× uint8 response
 static constexpr uint8_t kCmdPing             = 0x7F;   // → ack len=0
 
+// ── firmware identity + host-attached debug gate ─────────────────────────
+// The USB-Serial-JTAG CDC write() BLOCKS when no host has the port open,
+// and the deployed product runs standalone (P4 + S3, no PC).  Un-gated
+// per-frame prints would therefore stall the inference task once the CDC
+// buffer fills and the S3 would silently stop receiving verdicts.
+// Serial.isConnected() reflects the CDC connection state (a host actually
+// opened the port), so per-frame debug lines print only while a terminal /
+// the AItraining device preview is attached.
+static constexpr uint16_t kFirmwareVersion = 1;
+
+static bool s_fw_banner_sent = false;
+
+static inline bool host_attached() {
+  return Serial.isConnected();
+}
+
 // Operation mode (runtime switchable via Debug Serial)
 enum class OpMode : uint8_t {
   kInference = 0,   // default: full pipeline → UART / SD / periodic log
@@ -1599,6 +1615,24 @@ static void inference_task(void *arg) {
       s_last_mode = mode;
     }
 
+    // One-shot firmware identity banner, printed once per host attachment.
+    // Any terminal (or the AItraining device preview) then sees which
+    // firmware + model constants are actually flashed — the first line of
+    // defence against a stale-model device (the "reads everything as '1'"
+    // class of field failures).
+    if (!host_attached()) {
+      s_fw_banner_sent = false;
+    } else if (!s_fw_banner_sent) {
+      s_fw_banner_sent = true;
+      Serial.printf("SIGN_FW v=%u plates=%d", (unsigned)kFirmwareVersion,
+                    (int)SIGN_PLATE_COUNT);
+      for (int p = 0; p < SIGN_PLATE_COUNT; p++) {
+        Serial.printf(" %s", SIGN_PLATE_TEXT(p));
+      }
+      Serial.printf(" dark=%d lum=%d min_prob=%.2f\r\n", (int)kDarkThr,
+                    (int)kLumThr, (double)kSignMatchMinProb);
+    }
+
     uint32_t now_ms = millis();
 
     // ─────────────────────────────────────────────────────────
@@ -1992,7 +2026,7 @@ static void inference_task(void *arg) {
     const uint8_t confidence = (uint8_t)(slot_best_min < 0 ? 0
                                          : (slot_best_min > 255 ? 255 : slot_best_min));
 
-    if (mode == OpMode::kInference) {
+    if (mode == OpMode::kInference && host_attached()) {
       Serial.print("SIGN: ");
       if (no_sign) {
         Serial.print("NO SIGN (frame has no ink)");
@@ -2015,7 +2049,8 @@ static void inference_task(void *arg) {
     // First frames (and every 30th) carry the split diagnostics — a
     // num_boxes != num_slots trend, or a rising sign_empty count, means the
     // frame geometry / polarity is wrong, not that the model is bad.
-    if (mode == OpMode::kInference && (frame_id <= 10 || (frame_id % 30) == 0)) {
+    if (mode == OpMode::kInference && host_attached() &&
+        (frame_id <= 10 || (frame_id % 30) == 0)) {
       Serial.printf("  slots: boxes=%d/%d ink=%d match=%d/%d conf_min=%u flags=0x%02X\r\n",
                     (int)s_sign_info.num_boxes, (int)s_sign_info.num_slots,
                     no_sign ? 0 : 1, slots_matched, (int)SIGN_SEQUENCE_LEN,
@@ -2069,7 +2104,8 @@ static void inference_task(void *arg) {
     // tensors during Invoke, so reading input->data.int8 afterwards yields
     // structured garbage (moiré).  See the pre-Invoke block above.
 
-    if (mode == OpMode::kInference && (frame_id % 1) == 0 && s_timed_frames > 0) {
+    if (mode == OpMode::kInference && host_attached() &&
+        (frame_id % 1) == 0 && s_timed_frames > 0) {
       uint64_t cap = clamp_timing(s_total_capture_us / s_timed_frames);
       uint64_t inv = clamp_timing(s_total_invoke_us  / s_timed_frames);
       uint64_t lop = clamp_timing(s_total_loop_us    / s_timed_frames);
