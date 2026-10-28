@@ -1,16 +1,16 @@
 # Firmware License Terms
 
-> Template note: these terms accompany the ESP32-P4 / ESP32-S3 firmware
-> (TFLite_Sign, TFLite_OCR, TFLite legacy, S3_UART_Receiver and the camera
-> firmware). For firmware pre-flashed in sold hardware, print or reference
-> these terms in the product manual and on the product page. For firmware
-> distributed as binary files, ship this file next to the binaries. Replace
-> the `[bracketed]` placeholders before use.
+These terms accompany the ESP32-P4 / ESP32-S3 firmware (TFLite_Sign,
+TFLite_OCR, TFLite legacy, S3_UART_Receiver and the camera firmware).
+For firmware pre-flashed in sold hardware, these terms are printed or
+referenced in the product manual and on the product page. For firmware
+distributed as binary files, this file ships next to the binaries.
 
 ---
 
 **Firmware:** TFLiteTraining device firmware for ESP32-P4 / ESP32-S3
 **Licensor:** AIoScout — <https://aioscout.io>
+**Version:** 1.0 (2026-10-28)
 
 ## 1. License
 
@@ -53,4 +53,3 @@ These terms are governed by the laws of the People's Republic of China.
 ---
 
 **Licensor contact:** <https://aioscout.io>
-**Version:** 1.0 (2026-10-28)
