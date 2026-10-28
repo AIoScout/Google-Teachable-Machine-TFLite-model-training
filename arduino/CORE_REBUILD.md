@@ -2,17 +2,17 @@
 
 This document only covers two things:
 
-1. Install Espressif's `esp32` Boards Manager package (version 3.3.0)
+1. Install Espressif's `esp32` Boards Manager package (version 3.3.1)
 2. Install this repository's custom core `esp32_mannual:esp32p4` into the correct Arduino hardware path
 
-## 1) Install the `esp32` Boards Manager package (v3.3.0)
+## 1) Install the `esp32` Boards Manager package (v3.3.1)
 
 In Arduino IDE:
 
 - Tools → Board → Boards Manager
 - Search `esp32`
 - Select `esp32` by Espressif Systems
-- Choose version `3.3.0` and install
+- Choose version `3.3.1` and install
 
 If you cannot find `esp32` in Boards Manager, add this Boards Manager URL in Arduino IDE Preferences first:
 
